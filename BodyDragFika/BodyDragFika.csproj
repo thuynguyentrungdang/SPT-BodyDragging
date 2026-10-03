@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>BodyDragFika</AssemblyName>
+    <Authors>kobethuy</Authors>
+    <Version>1.0.0</Version>
+    <RootNamespace>BodyDragFika</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <SptRoot Condition="'$(SptRoot)' == ''">F:\SPT_4.1</SptRoot>
+    <!-- the sibling client's own build output, for the BodyDragSync seam. Not the deployed copy
+         in the install, which lags behind source -->
+    <BodyDraggingDll Condition="'$(BodyDraggingDll)' == ''">$(MSBuildThisFileDirectory)..\SPT-BodyDragging\bin\$(Configuration)\netstandard2.1\BodyDragging.dll</BodyDraggingDll>
+    <!-- prefer the install's own Fika copy; fall back to lib\ (gitignored - drop Fika.Core.dll
+         from a Fika release in it) so the bridge still builds without Fika installed -->
+    <FikaCore Condition="'$(FikaCore)' == ''">$(SptRoot)\BepInEx\plugins\Fika\Fika.Core.dll</FikaCore>
+    <FikaCore Condition="!Exists('$(FikaCore)')">$(MSBuildThisFileDirectory)..\lib\Fika.Core.dll</FikaCore>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BodyDragging">
+      <HintPath>$(BodyDraggingDll)</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Fika.Core">
+      <HintPath>$(FikaCore)</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx">
+      <HintPath>$(SptRoot)\BepInEx\core\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Comfort">
+      <HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\Comfort.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <PropertyGroup>
+    <InstallDir>$(SptRoot)\BepInEx\plugins\kobethuy-BodyDragging</InstallDir>
+  </PropertyGroup>
+
+  <Target Name="DeployBridge" AfterTargets="Build" Condition="'$(SkipDeploy)' != 'true'">
+    <MakeDir Directories="$(InstallDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(InstallDir)" SkipUnchangedFiles="false" />
+  </Target>
+
+</Project>

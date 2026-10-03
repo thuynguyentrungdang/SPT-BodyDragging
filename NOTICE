@@ -1,0 +1,11 @@
+BodyDragging
+Copyright 2026 kobethuy
+
+This product includes software derived from TraumaCore (https://github.com/Hysocs/traumacore-spt),
+Copyright Hysocs, licensed under the Apache License, Version 2.0.
+
+The corpse-drag feature in this mod (CorpseDragController, CorpseWeaponLink,
+CorpseRagdollSettlement, RagdollJointStability, and the chest-anchor lookup and Harmony patches
+built on them) is a derivative work ported from TraumaCore's WoundInspection feature set. Files
+have been modified: trimmed to the drag-only subset, decoupled from TraumaCore's own plugin
+config/logging, and extended with Fika multiplayer sync (BodyDragSync, BodyDragFika).

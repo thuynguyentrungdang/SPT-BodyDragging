@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="SPT-BodyDragging/SPT-BodyDragging.csproj" />
+  <Project Path="BodyDragFika/BodyDragFika.csproj" />
+</Solution>
