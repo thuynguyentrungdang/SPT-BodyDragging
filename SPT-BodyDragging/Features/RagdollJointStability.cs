@@ -18,6 +18,10 @@ namespace BodyDragging.Features
         // colliders pass through the world briefly so it can slide free, then re-enable them.
         private const float SnagSeparation = 0.08f;
         private const float SnagReleaseSeconds = 0.35f;
+        // A limb wedged in a wall/corner can start with a separation of decimeters to meters -
+        // closing that in one write (the old behavior) is a teleport. Cap the correction to a
+        // speed instead, scaled by deltaTime so it doesn't resolve faster at higher framerate.
+        private const float MaxRepairSpeed = 6f;
         private const float MaximumElbowFoldAngle = 135f;
         private const int MinimumSolverIterations = 12;
         private const int MinimumSolverVelocityIterations = 4;
@@ -90,8 +94,9 @@ namespace BodyDragging.Features
             }
         }
 
-        internal void RepairExcessiveSeparation()
+        internal void RepairExcessiveSeparation(float deltaTime)
         {
+            float maxStep = MaxRepairSpeed * deltaTime;
             for (int i = 0; i < _jointStates.Count; i++)
             {
                 JointState state = _jointStates[i];
@@ -111,22 +116,22 @@ namespace BodyDragging.Features
                 if (distance <= RepairAnchorSeparation)
                     continue;
 
+                // Likely wedged in geometry rather than just lagging - let this limb's colliders
+                // pass through the world briefly so the capped step below can slide it free
+                // instead of fighting whatever it is stuck on every tick
                 if (distance > SnagSeparation)
                 {
-                    // Likely wedged in geometry rather than just lagging - close the gap fully
-                    // and let this limb's colliders pass through the world briefly so it can
-                    // slide free instead of fighting whatever it is stuck on every tick
-                    body.position += separation;
-                    body.velocity = Vector3.zero;
-                    body.angularVelocity = Vector3.zero;
                     ReleaseFromWorld(state);
                     SnagEvents++;
-                    continue;
                 }
 
-                body.position += separation * ((distance - MaximumAnchorSeparation) / distance);
+                Vector3 desired = separation * ((distance - MaximumAnchorSeparation) / distance);
+                body.position += Vector3.ClampMagnitude(desired, maxStep);
                 body.velocity = Vector3.zero;
                 body.angularVelocity = Vector3.zero;
+                // next joint in the chain may read this body's transform as its connectedBody -
+                // make sure that read sees the write just made, not last frame's position
+                Physics.SyncTransforms();
             }
         }
 

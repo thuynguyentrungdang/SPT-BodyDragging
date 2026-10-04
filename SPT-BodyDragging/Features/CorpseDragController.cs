@@ -14,12 +14,32 @@ namespace BodyDragging.Features
     // replaced - see CreateHand). Trauma-specific dependencies (Plugin.EnableCorpseDragging,
     // TraumaLog, wound inspection) are replaced with this mod's own config/log, and BodyDragSync
     // hooks let an optional Fika bridge mirror the drag to peers.
+    //
+    // Grabbing while the corpse's own death ragdoll is still mid-collapse (joints not yet at an
+    // equilibrium pose - confirmed via decompiled source + extensive diagnostic logging) reliably
+    // explodes once dynamic joint physics + this class's break-force/solver overrides engage. A
+    // fully kinematic rigid-carry avoids that but gives up real ragdoll motion entirely, which
+    // isn't what's wanted here. Instead: wait for the corpse's own physics to actually go calm
+    // (BeginSettling/TickSettling, polled by velocity - not EFT's own `_isPhysicsDone` flag, which
+    // isn't guaranteed to ever flip under some hosting conditions) before engaging the real,
+    // dynamic joint-driven drag below. Matches why KeepMeAlive's own joint-tether ragdoll (ported
+    // from here originally) never explodes: it only ever ragdolls a living player from a calm
+    // pose, never a body that just absorbed a death impulse mid-collapse.
     internal sealed class CorpseDragController : MonoBehaviour
     {
         private const float HeldDistanceBlendDuration = 0.25f;
         private const float EmptyHandsRetryDelay = 0.25f;
         private const float EmptyHandsRequestTimeout = 1.5f;
         private const float PoseSendInterval = 1f / 15f;
+        // Below this, a body counts as settled rather than still actively falling/flailing.
+        private const float SettleVelocityThreshold = 0.3f;
+        private const float SettleAngularVelocityThreshold = 1f;
+        // Calm has to hold for a short stretch, not just one lucky frame mid-flail.
+        private const float RequiredCalmSeconds = 0.3f;
+        // Safety cap so a corpse that never reads as calm (edge case) doesn't block the grab
+        // forever - accept the residual risk after this long rather than brick dragging entirely,
+        // which is what gating on `_isPhysicsDone` directly did.
+        private const float MaxSettleWaitSeconds = 3f;
 
         private sealed class BodyState
         {
@@ -46,6 +66,9 @@ namespace BodyDragging.Features
         private float _maximumTargetSeparation;
         private float _separationDuration;
         private bool _originalPutToSleep;
+        private bool _isSettling;
+        private float _settleElapsed;
+        private float _calmElapsed;
         private bool _isStopping;
         private bool _claimDenied;
         private CorpseWeaponLink.DetachedWeapon _detachedWeapon;
@@ -85,7 +108,7 @@ namespace BodyDragging.Features
             if (localPlayer == null)
                 return;
             CorpseDragController controller = localPlayer.gameObject.AddComponent<CorpseDragController>();
-            if (!controller.Capture(owner, corpse))
+            if (!controller.BeginSettling(owner, corpse))
             {
                 Destroy(controller);
                 return;
@@ -115,9 +138,11 @@ namespace BodyDragging.Features
             }
         }
 
-        private bool Capture(GamePlayerOwner owner, Corpse corpse)
+        // Claims the corpse and camera/validation state immediately (so nobody else can grab it
+        // and the interaction prompt updates right away), but doesn't touch the ragdoll's physics
+        // yet - TickSettling waits for it to actually go calm before EngageDrag runs.
+        private bool BeginSettling(GamePlayerOwner owner, Corpse corpse)
         {
-            CorpseRagdollSettlement.Cancel(corpse);
             _owner = owner;
             _corpse = corpse;
             _localPlayer = GamePlayerOwner.MyPlayer;
@@ -129,6 +154,56 @@ namespace BodyDragging.Features
             if (!Plugin.AllowZombieOrBotCorpses.Value && corpse.IsZombieCorpse)
                 return false;
 
+            CorpseRagdollSettlement.Cancel(corpse);
+            _isSettling = true;
+            _settleElapsed = 0f;
+            _calmElapsed = 0f;
+            BodyDragLog.Info("[CorpseDrag] Corpse still settling, drag will engage once calm");
+            return true;
+        }
+
+        // Polls the ragdoll's own (untouched) physics each frame until it's been calm for
+        // RequiredCalmSeconds, or MaxSettleWaitSeconds elapses regardless.
+        private void TickSettling(float deltaTime)
+        {
+            if (_corpse == null || _ragdoll?._rigidbodySpawners == null)
+            {
+                StopDragging();
+                return;
+            }
+
+            _settleElapsed += deltaTime;
+            _calmElapsed = IsRagdollCalm() ? _calmElapsed + deltaTime : 0f;
+
+            if (_calmElapsed < RequiredCalmSeconds && _settleElapsed < MaxSettleWaitSeconds)
+                return;
+
+            _isSettling = false;
+            if (!EngageDrag())
+            {
+                BodyDragLog.Warning("[CorpseDrag] Could not engage drag after settling");
+                StopDragging();
+            }
+        }
+
+        private bool IsRagdollCalm()
+        {
+            float velocitySq = SettleVelocityThreshold * SettleVelocityThreshold;
+            float angularVelocitySq = SettleAngularVelocityThreshold * SettleAngularVelocityThreshold;
+            foreach (RigidbodySpawner spawner in _ragdoll._rigidbodySpawners)
+            {
+                Rigidbody body = spawner?.Rigidbody;
+                if (body == null || body.isKinematic)
+                    continue;
+                if (body.velocity.sqrMagnitude > velocitySq || body.angularVelocity.sqrMagnitude > angularVelocitySq)
+                    return false;
+            }
+            return true;
+        }
+
+        // The real grab: runs only once the corpse has been confirmed calm by TickSettling.
+        private bool EngageDrag()
+        {
             Dictionary<RigidbodySpawner, (Vector3 Position, Quaternion Rotation)> poses =
                 _ragdoll._rigidbodySpawners
                     .Where(spawner => spawner != null)
@@ -424,7 +499,7 @@ namespace BodyDragging.Features
                 _grabbedBody.WakeUp();
             _handBody.MovePosition(Vector3.MoveTowards(_handBody.position, target, Plugin.MaxHandSpeed.Value * deltaTime));
             DriveLimbs();
-            _jointStability.RepairExcessiveSeparation();
+            _jointStability.RepairExcessiveSeparation(deltaTime);
 
             _diagElapsed += deltaTime;
             if (DragDiagnostics.ShouldProbe(_diagElapsed, ref _diagNextProbe))
@@ -495,7 +570,7 @@ namespace BodyDragging.Features
             {
                 ProfileId = _corpse.PlayerProfileID,
                 Sequence = _poseSequence++,
-                Pelvis = _grabbedBody.position,
+                Pelvis = _grabbedBody != null ? _grabbedBody.position : Vector3.zero,
                 BonePositions = positions,
                 BoneRotations = rotations
             };
@@ -506,7 +581,10 @@ namespace BodyDragging.Features
             if (_localPlayer?.MovementContext != null)
                 _localPlayer.MovementContext.EnableSprint(false);
             RequestEmptyHands();
-            TickDrag(Time.deltaTime);
+            if (_isSettling)
+                TickSettling(Time.deltaTime);
+            else
+                TickDrag(Time.deltaTime);
         }
 
         private void StopDragging()
@@ -523,10 +601,10 @@ namespace BodyDragging.Features
 
         private void OnDestroy()
         {
-            if (_ragdoll != null)
+            if (_ragdoll != null && _grabbedBody != null)
                 LogDiagState("release");
             DestroyHand();
-            _jointStability.RepairExcessiveSeparation();
+            _jointStability.RepairExcessiveSeparation(Time.deltaTime);
             _jointStability.Restore();
             foreach (BodyState state in _bodyStates)
                 if (state.Body != null)
@@ -543,7 +621,7 @@ namespace BodyDragging.Features
             if (_corpse != null)
             {
                 CorpseRagdollSettlement.Schedule(_corpse, _ragdoll);
-                if (BodyDragSync.Active && !_claimDenied)
+                if (BodyDragSync.Active && !_claimDenied && _grabbedBody != null)
                     BodyDragSync.DragStoppedLocally?.Invoke(_corpse.PlayerProfileID, BuildPose());
             }
             if (_active == this)

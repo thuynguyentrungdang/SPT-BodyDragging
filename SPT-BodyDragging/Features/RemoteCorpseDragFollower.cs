@@ -85,6 +85,15 @@ namespace BodyDragging.Features
                 MissRetryAfter[profileId] = now + MissRetryIntervalSeconds;
                 return null;
             }
+            // a host relaying/broadcasting its own dragger's pose packets can hand them straight
+            // back to that same local client (self-echo) - without this guard, the ~15Hz network
+            // pose would fight the local per-frame joint-driven drag on the exact same corpse,
+            // producing constant jitter (move forward, snap back to the stale packet, repeat)
+            if (CorpseDragController.IsDragging(corpse))
+            {
+                MissRetryAfter[profileId] = now + MissRetryIntervalSeconds;
+                return null;
+            }
             MissRetryAfter.Remove(profileId);
 
             CorpseRagdollSettlement.TakeOver(corpse.Ragdoll);
