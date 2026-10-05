@@ -9,6 +9,7 @@ namespace BodyDragging.Integration
         public string Session;
         public string ProfileId;
         public uint DeathSequence;
+        public string DraggerProfileId;
     }
     public struct ManagedDragInput
     {
@@ -18,6 +19,9 @@ namespace BodyDragging.Integration
         public uint Sequence;
         public bool HasTarget;
         public Vector3 Target;
+        // Camera-relative hold, so the host can rebuild the target from the dragger's own
+        // synced pose each frame: root + R(yaw) * (LocalX, 0, LocalZ + Distance), y = root.y + HeightOffset.
+        public float Distance, LocalX, LocalZ, HeightOffset, Yaw;
     }
     public struct ManagedDragEnd
     {
@@ -41,6 +45,9 @@ namespace BodyDragging.Integration
         internal uint Sequence { get; private set; }
         internal bool HasTarget { get; private set; }
         internal Vector3 Target { get; private set; }
+        internal ManagedDragInput Latest { get; private set; }
+        internal static bool FiniteHold(ManagedDragInput input) => Finite(input.Distance) && Finite(input.LocalX) &&
+            Finite(input.LocalZ) && Finite(input.HeightOffset) && Finite(input.Yaw);
         internal static bool Finite(Vector3 value) => Finite(value.x) && Finite(value.y) && Finite(value.z);
         internal static bool Finite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
         internal static bool ValidSession(string value) => value != null && value.Length == 32 && Guid.TryParseExact(value, "N", out _);
@@ -48,7 +55,8 @@ namespace BodyDragging.Integration
             session == otherSession && profile == otherProfile && death == otherDeath;
         internal bool Accept(ManagedDragInput input)
         {
-            if (input.Sequence == 0 || input.Sequence <= Sequence || !Finite(input.Target)) return false;
+            if (input.Sequence == 0 || input.Sequence <= Sequence || !Finite(input.Target) || !FiniteHold(input)) return false;
+            Latest = input;
             Sequence = input.Sequence;
             HasTarget = input.HasTarget;
             Target = input.Target;

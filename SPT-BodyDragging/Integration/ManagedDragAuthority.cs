@@ -21,8 +21,11 @@ namespace BodyDragging.Integration
             internal readonly ManagedIntentBuffer Input = new();
             internal ManagedDragDrive Drive;
             internal ManagedDragLifetime Lifetime;
-            internal float FirstOkAt, HeldAt, NextWaitLog;
-            internal bool LoggedFirstTarget;
+            internal float FirstOkAt, HeldAt, NextWaitLog, ArmCalm;
+            internal bool LoggedFirstTarget, Remote, LoggedFallback;
+            internal Player Dragger;
+            internal string TargetSource = "input";
+            internal readonly ManagedTargetSmoother Smoother = new();
             internal float Calm, LastTick, NextStatus;
             internal uint FrameSequence, StatusSequence;
             internal bool Ready, Ending, Failed;
@@ -34,6 +37,8 @@ namespace BodyDragging.Integration
         }
         // Resting Rupture limbs can jitter above the calm thresholds, so keep the cap short.
         private const float CalmWaitCap = 0.5f;
+        // Limb assist waits for a looser calm than the grab gate, but never longer than ArmMaxWait.
+        private const float ArmSpeed = 0.5f, ArmSpin = 3f, ArmCalmSeconds = 0.15f, ArmMaxWait = 1.5f;
         private static readonly Dictionary<string, Session> Sessions = new();
         private static readonly Dictionary<string, string> Profiles = new();
         private static GameWorld _world;
@@ -53,6 +58,8 @@ namespace BodyDragging.Integration
             float now = Time.realtimeSinceStartup;
             Session session = new Session { Identity = start, Corpse = corpse, Ragdoll = corpse.Ragdoll, Lease = lease,
                 Settings = settings, Lifetime = new ManagedDragLifetime(now), LastTick = now };
+            session.Dragger = string.IsNullOrEmpty(start.DraggerProfileId) ? null : Singleton<GameWorld>.Instance.GetEverExistedPlayerByID(start.DraggerProfileId);
+            session.Remote = BodyDragSync.Active && !(session.Dragger != null && session.Dragger.IsYourPlayer);
             _world = Singleton<GameWorld>.Instance;
             Sessions.Add(start.Session, session); Profiles.Add(start.ProfileId, start.Session);
             BodyDragLog.Info($"[Rupture] timing {start.ProfileId}: lease granted ({result}) t=0");
@@ -125,6 +132,7 @@ namespace BodyDragging.Integration
                             session.Ready = true;
                             session.HeldAt = now;
                             session.Drive = new ManagedDragDrive(session.Settings, view);
+                            session.Drive.Suspend();
                             Publish(session, ManagedDragStage.Held);
                             BodyDragLog.Info($"[Rupture] timing {session.Identity.ProfileId}: Held published t={(now - session.Lifetime.Started) * 1000f:F0}ms " +
                                 $"reason={(session.Calm >= .3f ? "calm" : "cap")} maxSpeed={Math.Sqrt(maxSpeed2):F2}m/s(limit .3) maxSpin={Math.Sqrt(maxSpin2):F2}rad/s(limit 1)");
@@ -141,8 +149,19 @@ namespace BodyDragging.Integration
                         session.LoggedFirstTarget = true;
                         BodyDragLog.Info($"[Rupture] timing {session.Identity.ProfileId}: first client target applied {(now - session.HeldAt) * 1000f:F0}ms after Held");
                     }
-                    Vector3 target = session.Ready && session.Input.HasTarget ? session.Input.Target : view.GripPosition;
-                    ProviderAcceleration[] forces = session.Ready && session.Input.HasTarget ? session.Drive.Compose(view, target, dt) : Array.Empty<ProviderAcceleration>();
+                    if (session.Ready && !session.Drive.Armed) ArmLimbAssist(session, view, dt, now);
+                    bool driving = session.Ready && session.Input.HasTarget;
+                    Vector3 target = view.GripPosition;
+                    float yaw = float.NaN;
+                    if (driving)
+                    {
+                        target = ResolveTarget(session, out yaw);
+                        if (session.Remote)
+                            target = session.Smoother.Step(target, view.GripPosition, session.Settings.TargetSmoothing, dt,
+                                session.Settings.HandSpeed, session.Settings.TeleportDistance);
+                    }
+                    else session.Smoother.Reset();
+                    ProviderAcceleration[] forces = driving ? session.Drive.Compose(view, target, dt, yaw) : Array.Empty<ProviderAcceleration>();
                     if (session.FrameSequence == uint.MaxValue) { Close(session, true); continue; }
                     result = RuptureDragProvider.Submit(session.Lease, ++session.FrameSequence, view.Topology, target, forces,
                         session.Drive?.TranslationId ?? 0, session.Drive?.Translation ?? Vector3.zero);
@@ -155,6 +174,49 @@ namespace BodyDragging.Integration
                     Close(session, true);
                 }
             }
+        }
+        private static void ArmLimbAssist(Session session, ProviderView view, float dt, float now)
+        {
+            float speed2 = 0, spin2 = 0;
+            foreach (ProviderBody body in view.Bodies)
+            {
+                if (!body.Eligible) continue;
+                speed2 = Math.Max(speed2, body.Velocity.sqrMagnitude);
+                spin2 = Math.Max(spin2, body.AngularVelocity.sqrMagnitude);
+            }
+            session.ArmCalm = speed2 <= ArmSpeed * ArmSpeed && spin2 <= ArmSpin * ArmSpin ? session.ArmCalm + dt : 0;
+            bool calm = session.ArmCalm >= ArmCalmSeconds;
+            if (!calm && now - session.HeldAt < ArmMaxWait) return;
+            session.Drive.Arm(view);
+            BodyDragLog.Info($"[Rupture] limb assist armed {(now - session.HeldAt) * 1000f:F0}ms after Held reason={(calm ? "calm" : "max-wait")} " +
+                $"maxSpeed={Math.Sqrt(speed2):F2}m/s maxSpin={Math.Sqrt(spin2):F2}rad/s");
+        }
+        // A remote dragger's own interpolated pose is continuous per frame; the 15Hz camera target
+        // is only the fallback/sanity reference (and the whole path for local drags).
+        private static Vector3 ResolveTarget(Session session, out float yaw)
+        {
+            ManagedDragInput input = session.Input.Latest;
+            yaw = input.Yaw;
+            session.TargetSource = "input";
+            Player dragger = session.Dragger;
+            if (!session.Remote || dragger == null || !dragger.isActiveAndEnabled || dragger.MovementContext == null)
+                return session.Input.Target;
+            Vector3 root = dragger.Position;
+            float playerYaw = dragger.Yaw;
+            Vector3 derived = root + Quaternion.Euler(0, playerYaw, 0) * new Vector3(input.LocalX, 0, input.LocalZ + input.Distance);
+            derived.y = root.y + input.HeightOffset;
+            if (!ManagedIntentBuffer.Finite(derived) || (derived - session.Input.Target).sqrMagnitude > session.Settings.HoldError * session.Settings.HoldError)
+            {
+                if (!session.LoggedFallback)
+                {
+                    session.LoggedFallback = true;
+                    BodyDragLog.Info($"[Rupture] dragger pose target diverged from client target by {(derived - session.Input.Target).magnitude:F2}m; using client input");
+                }
+                return session.Input.Target;
+            }
+            yaw = playerYaw;
+            session.TargetSource = "player";
+            return derived;
         }
         private static void LogCadence(Session session, ProviderView view, float dt, float now)
         {
@@ -170,7 +232,8 @@ namespace BodyDragging.Integration
             if (now < session.LogAt) return;
             float window = 2f + (now - session.LogAt);
             BodyDragLog.Info($"[Rupture] cadence {session.Identity.ProfileId}: ticks/s={session.Ticks / window:F1} steps/s={session.Steps / window:F1} " +
-                $"avgSimDt={(session.Steps > 0 ? session.SimDtSum / session.Steps : 0f) * 1000f:F1}ms maxTickDt={session.MaxTickDt * 1000f:F0}ms inputs/s={session.Inputs / window:F1}");
+                $"avgSimDt={(session.Steps > 0 ? session.SimDtSum / session.Steps : 0f) * 1000f:F1}ms maxTickDt={session.MaxTickDt * 1000f:F0}ms inputs/s={session.Inputs / window:F1} " +
+                $"remote={session.Remote} targetSource={session.TargetSource} smoothing={session.Settings.TargetSmoothing:F2}s yawFollow={session.Settings.YawFollow:F2}");
             session.Ticks = session.Steps = session.Inputs = 0;
             session.SimDtSum = session.MaxTickDt = 0;
             session.LogAt = now + 2f;

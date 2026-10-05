@@ -17,7 +17,7 @@ namespace BodyDragging
     {
         public const string Guid = "com.kobethuy.bodydragging";
         public const string Name = "BodyDragging";
-        public const string Version = "1.0.1";
+        public const string Version = "1.0.2";
 
         private const string FikaPluginGuid = "com.fika.core";
         private const string FikaBridgeAssemblyName = "BodyDragFika.dll";
@@ -40,6 +40,8 @@ namespace BodyDragging
         internal static ConfigEntry<bool> AllowZombieOrBotCorpses { get; private set; }
         internal static ConfigEntry<bool> DebugLogging { get; private set; }
         internal static ConfigEntry<bool> HeadlessApplyFinalPoseOnly { get; private set; }
+        internal static ConfigEntry<float> RemoteTargetSmoothing { get; private set; }
+        internal static ConfigEntry<float> HoldPoseYawFollow { get; private set; }
 
         private PatchManager _patchManager;
         private MethodInfo _fikaBridgeShutdown;
@@ -84,6 +86,12 @@ namespace BodyDragging
                 "Seconds the corpse may stay outside interaction range before being released.");
             LimbFollowStrength = Config.Bind("Physics", "Limb Follow Strength", 0.5f,
                 "Fraction of Grab Spring applied directly to every other ragdoll body (not just the grabbed one), closing the speed gap between torso and limbs. 0 = limbs only follow through joints (old behavior).");
+            RemoteTargetSmoothing = Config.Bind("Rupture", "Remote Target Smoothing", 0.08f,
+                new ConfigDescription("Rupture-managed corpses only, read on the authority (host/headless): smoothing time in seconds for the hold target when the dragger is a remote Fika client. 0 = off. Local/solo drags are never smoothed.",
+                    new AcceptableValueRange<float>(0f, 0.3f)));
+            HoldPoseYawFollow = Config.Bind("Rupture", "Hold Pose Yaw Follow", 0f,
+                new ConfigDescription("Rupture-managed corpses only, read on the authority. Experimental: how strongly the limb-follow assist swings the body around the grip as the dragger turns (1 = body keeps its pose relative to your facing, 0 = body only translates and trails, the default). Raise gradually; it can add twisting. Needs Limb Follow Strength above 0.",
+                    new AcceptableValueRange<float>(0f, 1f)));
             DragSpeedMultiplier = Config.Bind("General", "Drag Speed Multiplier", 0.2f,
                 "Movement speed multiplier applied to the local player while dragging.");
             UnequipHandsWhileDragging = Config.Bind("General", "Unequip Hands While Dragging", true,

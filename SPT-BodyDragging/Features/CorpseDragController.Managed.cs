@@ -44,6 +44,7 @@ namespace BodyDragging.Features
                 return;
             }
             Vector3 target = Vector3.zero;
+            float holdDistance = 0, localX = 0, localZ = 0, heightOffset = 0, yaw = 0;
             if (_managedReady)
             {
                 Transform camera = _camera.transform;
@@ -51,8 +52,12 @@ namespace BodyDragging.Features
                 _grabDistanceBlendElapsed += deltaTime;
                 float blend = Mathf.SmoothStep(0, 1, Mathf.Clamp01(_grabDistanceBlendElapsed / HeldDistanceBlendDuration));
                 float distance = Mathf.Lerp(_initialGrabDistance, _targetGrabDistance, blend);
-                target = position + Quaternion.Euler(0, camera.eulerAngles.y, 0) * Vector3.forward * distance;
+                yaw = camera.eulerAngles.y;
+                target = position + Quaternion.Euler(0, yaw, 0) * Vector3.forward * distance;
                 target.y = _grabHeightAtCapture + position.y - _cameraHeightAtCapture;
+                Vector3 root = _localPlayer.Position;
+                Vector3 local = Quaternion.Euler(0, -yaw, 0) * new Vector3(position.x - root.x, 0, position.z - root.z);
+                holdDistance = distance; localX = local.x; localZ = local.z; heightOffset = target.y - root.y;
                 if ((_managedGripPoint - position).sqrMagnitude > _maximumTargetSeparation * _maximumTargetSeparation)
                 {
                     _separationDuration += deltaTime;
@@ -66,7 +71,8 @@ namespace BodyDragging.Features
             _nextPoseSendTime = Time.unscaledTime + PoseSendInterval;
             BodyDragSync.ManagedInputSent?.Invoke(new ManagedDragInput {
                 Session = _managedIdentity.Session, ProfileId = _managedIdentity.ProfileId, DeathSequence = _managedIdentity.DeathSequence,
-                Sequence = ++_managedInputSequence, HasTarget = _managedReady, Target = target });
+                Sequence = ++_managedInputSequence, HasTarget = _managedReady, Target = target,
+                Distance = holdDistance, LocalX = localX, LocalZ = localZ, HeightOffset = heightOffset, Yaw = yaw });
         }
     }
 }

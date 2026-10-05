@@ -172,7 +172,7 @@ namespace BodyDragging.Features
             {
                 _managed = true;
                 _managedIdentity = new ManagedDragStart { Session = System.Guid.NewGuid().ToString("N"),
-                    ProfileId = corpse.PlayerProfileID, DeathSequence = info.DeathSequence };
+                    ProfileId = corpse.PlayerProfileID, DeathSequence = info.DeathSequence, DraggerProfileId = _localPlayer.ProfileId };
                 _lastManagedStatus = _managedBeganAt = Time.realtimeSinceStartup;
                 return true;
             }
