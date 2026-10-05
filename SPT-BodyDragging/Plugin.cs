@@ -42,6 +42,9 @@ namespace BodyDragging
         internal static ConfigEntry<bool> HeadlessApplyFinalPoseOnly { get; private set; }
         internal static ConfigEntry<float> RemoteTargetSmoothing { get; private set; }
         internal static ConfigEntry<float> HoldPoseYawFollow { get; private set; }
+        internal static ConfigEntry<bool> GroundFollowHold { get; private set; }
+        internal static ConfigEntry<bool> HeadLeads { get; private set; }
+        internal static ConfigEntry<float> HeadLeadTurnRate { get; private set; }
 
         private PatchManager _patchManager;
         private MethodInfo _fikaBridgeShutdown;
@@ -92,6 +95,13 @@ namespace BodyDragging
             HoldPoseYawFollow = Config.Bind("Rupture", "Hold Pose Yaw Follow", 0f,
                 new ConfigDescription("Rupture-managed corpses only, read on the authority. Experimental: how strongly the limb-follow assist swings the body around the grip as the dragger turns (1 = body keeps its pose relative to your facing, 0 = body only translates and trails, the default). Raise gradually; it can add twisting. Needs Limb Follow Strength above 0.",
                     new AcceptableValueRange<float>(0f, 1f)));
+            GroundFollowHold = Config.Bind("Rupture", "Ground Follow Hold", true,
+                "Rupture-managed corpses only, read on the authority. Keeps the hold height at the grab-time height above the terrain under the hold point (smoothed), instead of following your camera height. Stops camera bob/stance changes and slopes from lifting the body off the ground so it hops along. Turn off to restore camera-relative height.");
+            HeadLeads = Config.Bind("Rupture", "Head Leads", false,
+                "Rupture-managed corpses only, read on the authority. Experimental: the limb-follow assist turns the body so its head end faces you while dragging (the body is held by the upper chest either way). Replaces Hold Pose Yaw Follow while on. Needs Limb Follow Strength above 0.");
+            HeadLeadTurnRate = Config.Bind("Rupture", "Head Lead Turn Rate", 120f,
+                new ConfigDescription("Fastest the head-leads assist swings the body round, in degrees per second. Lower = gentler flip of a head-away corpse.",
+                    new AcceptableValueRange<float>(30f, 360f)));
             DragSpeedMultiplier = Config.Bind("General", "Drag Speed Multiplier", 0.2f,
                 "Movement speed multiplier applied to the local player while dragging.");
             UnequipHandsWhileDragging = Config.Bind("General", "Unequip Hands While Dragging", true,

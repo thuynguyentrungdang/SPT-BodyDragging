@@ -26,6 +26,9 @@ namespace BodyDragging.Integration
             internal Player Dragger;
             internal string TargetSource = "input";
             internal readonly ManagedTargetSmoother Smoother = new();
+            internal readonly ManagedHeightFilter HeightFilter = new();
+            internal float HoldAboveGround = float.NaN;
+            internal float VyMax, DyMin = float.PositiveInfinity, DyMax = float.NegativeInfinity;
             internal float Calm, LastTick, NextStatus;
             internal uint FrameSequence, StatusSequence;
             internal bool Ready, Ending, Failed;
@@ -132,6 +135,7 @@ namespace BodyDragging.Integration
                             session.Ready = true;
                             session.HeldAt = now;
                             session.Drive = new ManagedDragDrive(session.Settings, view);
+                            FindAxisBodies(session.Ragdoll, out session.Drive.HeadIndex, out session.Drive.PelvisIndex);
                             session.Drive.Suspend();
                             Publish(session, ManagedDragStage.Held);
                             BodyDragLog.Info($"[Rupture] timing {session.Identity.ProfileId}: Held published t={(now - session.Lifetime.Started) * 1000f:F0}ms " +
@@ -159,8 +163,13 @@ namespace BodyDragging.Integration
                         if (session.Remote)
                             target = session.Smoother.Step(target, view.GripPosition, session.Settings.TargetSmoothing, dt,
                                 session.Settings.HandSpeed, session.Settings.TeleportDistance);
+                        target = HoldHeight(session, target, view, dt);
+                        ProviderBody grip = view.Bodies[view.GripIndex];
+                        session.VyMax = Math.Max(session.VyMax, Math.Abs(grip.Velocity.y));
+                        session.DyMin = Math.Min(session.DyMin, target.y - grip.CenterOfMass.y);
+                        session.DyMax = Math.Max(session.DyMax, target.y - grip.CenterOfMass.y);
                     }
-                    else session.Smoother.Reset();
+                    else { session.Smoother.Reset(); session.HeightFilter.Reset(); }
                     ProviderAcceleration[] forces = driving ? session.Drive.Compose(view, target, dt, yaw) : Array.Empty<ProviderAcceleration>();
                     if (session.FrameSequence == uint.MaxValue) { Close(session, true); continue; }
                     result = RuptureDragProvider.Submit(session.Lease, ++session.FrameSequence, view.Topology, target, forces,
@@ -173,6 +182,46 @@ namespace BodyDragging.Integration
                     BodyDragLog.Warning("[Rupture] Authority drag failed: " + exception.GetBaseException().Message);
                     Close(session, true);
                 }
+            }
+        }
+        private const float GroundHoldSmoothing = 0.15f;
+        private static bool TryGroundY(Vector3 chest, float x, float z, out float y)
+        {
+            // Start just above the chest so a low ceiling above it is never the surface we find.
+            Vector3 origin = new Vector3(x, chest.y + 0.5f, z);
+            if (Physics.Raycast(origin, Vector3.down, out RaycastHit hit, 3f, LayersMaskController.HighPolyWithTerrainMask))
+            {
+                y = hit.point.y;
+                return true;
+            }
+            y = 0f;
+            return false;
+        }
+        // Hold height = grab-time height above the terrain under the hold point, low-passed, rather
+        // than the camera's height (bob/stance/slope would lift the chest off the floor and the
+        // body hops). Falls back to the camera-derived height when no ground is found.
+        private static Vector3 HoldHeight(Session session, Vector3 target, ProviderView view, float dt)
+        {
+            if (!Plugin.GroundFollowHold.Value) return target;
+            Vector3 chest = view.Bodies[view.GripIndex].CenterOfMass;
+            if (float.IsNaN(session.HoldAboveGround))
+                session.HoldAboveGround = TryGroundY(chest, chest.x, chest.z, out float gripGround) ? Mathf.Clamp(chest.y - gripGround, 0.05f, 0.6f) : -1f;
+            if (session.HoldAboveGround < 0f || !TryGroundY(chest, target.x, target.z, out float ground)) return target;
+            target.y = session.HeightFilter.Step(ground + session.HoldAboveGround, chest.y, GroundHoldSmoothing, dt);
+            return target;
+        }
+        // Rupture's body index is the original _rigidbodySpawners index; identity comes from the
+        // spawner's BodyPartCollider, which outlives the native rigidbody.
+        private static void FindAxisBodies(CorpseRagdoll ragdoll, out int head, out int pelvis)
+        {
+            head = pelvis = -1;
+            RigidbodySpawner[] spawners = ragdoll?._rigidbodySpawners;
+            if (spawners == null) return;
+            for (int i = 0; i < spawners.Length; i++)
+            {
+                if (spawners[i] == null || !spawners[i].TryGetComponent(out BodyPartCollider part)) continue;
+                if (part.BodyPartColliderType == EBodyPartColliderType.HeadCommon) head = i;
+                else if (part.BodyPartColliderType == EBodyPartColliderType.Pelvis) pelvis = i;
             }
         }
         private static void ArmLimbAssist(Session session, ProviderView view, float dt, float now)
@@ -189,7 +238,8 @@ namespace BodyDragging.Integration
             if (!calm && now - session.HeldAt < ArmMaxWait) return;
             session.Drive.Arm(view);
             BodyDragLog.Info($"[Rupture] limb assist armed {(now - session.HeldAt) * 1000f:F0}ms after Held reason={(calm ? "calm" : "max-wait")} " +
-                $"maxSpeed={Math.Sqrt(speed2):F2}m/s maxSpin={Math.Sqrt(spin2):F2}rad/s");
+                $"maxSpeed={Math.Sqrt(speed2):F2}m/s maxSpin={Math.Sqrt(spin2):F2}rad/s headLeads={session.Settings.HeadLeads} " +
+                $"headIdx={session.Drive.HeadIndex} pelvisIdx={session.Drive.PelvisIndex} heading={session.Drive.HasHeading}");
         }
         // A remote dragger's own interpolated pose is continuous per frame; the 15Hz camera target
         // is only the fallback/sanity reference (and the whole path for local drags).
@@ -233,8 +283,10 @@ namespace BodyDragging.Integration
             float window = 2f + (now - session.LogAt);
             BodyDragLog.Info($"[Rupture] cadence {session.Identity.ProfileId}: ticks/s={session.Ticks / window:F1} steps/s={session.Steps / window:F1} " +
                 $"avgSimDt={(session.Steps > 0 ? session.SimDtSum / session.Steps : 0f) * 1000f:F1}ms maxTickDt={session.MaxTickDt * 1000f:F0}ms inputs/s={session.Inputs / window:F1} " +
+                $"gripVyMax={session.VyMax:F2}m/s targetMinusGripY={(float.IsInfinity(session.DyMin) ? 0f : session.DyMin):F2}..{(float.IsInfinity(session.DyMax) ? 0f : session.DyMax):F2}m holdAboveGround={session.HoldAboveGround:F2} " +
                 $"remote={session.Remote} targetSource={session.TargetSource} smoothing={session.Settings.TargetSmoothing:F2}s yawFollow={session.Settings.YawFollow:F2}");
             session.Ticks = session.Steps = session.Inputs = 0;
+            session.VyMax = 0; session.DyMin = float.PositiveInfinity; session.DyMax = float.NegativeInfinity;
             session.SimDtSum = session.MaxTickDt = 0;
             session.LogAt = now + 2f;
         }
