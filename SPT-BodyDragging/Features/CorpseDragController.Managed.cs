@@ -60,7 +60,8 @@ namespace BodyDragging.Features
                 }
                 else _separationDuration = 0;
             }
-            if (Time.unscaledTime < _nextPoseSendTime) return;
+            bool localAuthority = !BodyDragSync.Active || BodyDragSync.IsHost;
+            if (!localAuthority && Time.unscaledTime < _nextPoseSendTime) return;
             if (_managedInputSequence == uint.MaxValue) { StopDragging(); return; }
             _nextPoseSendTime = Time.unscaledTime + PoseSendInterval;
             BodyDragSync.ManagedInputSent?.Invoke(new ManagedDragInput {

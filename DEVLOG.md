@@ -177,6 +177,14 @@ No new config for the settle-wait yet: `SettleVelocityThreshold`(0.3 m/s)/`Settl
 
 28. **Confirmed live (user):** `CalmWaitCap` 0.5s fixes grab→drag delay. Open: stutter (Rupture ~29 steps/s on headless, #27) - Rupture/headless side.
 
+29. **Local raid test (user):** jitter present but far less than headless. Cadence (local authority): ticks/s≈steps/s≈122-141, avgSimDt 7-8ms (Rupture steps every frame, good) but `inputs/s`=14-14.5 → camera target still stepped at 15Hz. Also timing: Held 565-570ms after grab (cap 0.5s hit every time - maxSpin 0.6-84 rad/s, i.e. gate rarely satisfiable; fine). Held→first target 7-68ms.
+    - Cause of residual local jitter (hypothesis, matches #23): hand pursues target at ≤`MaxGripSpeed·dt` (4.5 m/s) toward a target that updates every 66ms → arrives, idles, repeats. At 140Hz sim this is clearly visible; at headless 29Hz it's buried under step-rate jitter.
+    - **Fix:** `TickManaged` throttle (15Hz) now applies only to remote Fika clients. Local authority (`!BodyDragSync.Active || IsHost`: solo, graphical-host self-drag) submits target every frame - those paths call `ManagedDragAuthority.Input` directly (no network), so no cost. Remote clients still 15Hz Sequenced. No smoothing reintroduced (reverted per #25). Deployed Debug build; harness 85/85. Not live-tested.
+    - If remote-client/headless jitter remains: needs host-side smoothing (#23 approach) *and* headless step rate fix (#27) - ask before re-adding smoothing.
+
+30. **Confirmed live (user):** per-frame target for local authority (#29) fixes local-raid jitter. Remote Fika client / headless jitter still open (Rupture ~29 steps/s on headless; 15Hz input; no smoothing).
+31. KeepMeAlive video review (`SPT-BodyDragging/docs/keepmealive.mp4`; KMA source is older than video): stills only (no ffmpeg; WPF MediaPlayer frame grab, temp files deleted). Dragger first-person, low; living downed teammate (red bleedout timer, "Released teammate", REVIVE/DRAG/SEARCH prompt). Body pinned close bottom-centre, yaw follows camera; gloved hand visibly gripping collar/vest = likely new feature. Hold pose already matches ours. Hand grip + motion smoothness mechanism unknown from stills; per-peer local sim blocked by Rupture owning corpse. **Nothing implemented**; awaiting user: copy target (grip / smoothness / hold pose) + does body flop or stay rigid.
+
 ## Live acceptance TODO (from handoff - none run)
 
 - Solo ±Rupture: provider select, drag, hands/move restore, release, re-grab.
