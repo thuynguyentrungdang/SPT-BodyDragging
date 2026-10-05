@@ -7,15 +7,17 @@ using BepInEx.Configuration;
 using BepInEx.Logging;
 using SPT.Reflection.Patching;
 using BodyDragging.Features;
+using BodyDragging.Integration;
 
 namespace BodyDragging
 {
     [BepInPlugin(Guid, Name, Version)]
+    [BepInDependency(RuptureDragProvider.PluginGuid, BepInDependency.DependencyFlags.SoftDependency)]
     public sealed class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.kobethuy.bodydragging";
         public const string Name = "BodyDragging";
-        public const string Version = "1.0.0";
+        public const string Version = "1.0.1";
 
         private const string FikaPluginGuid = "com.fika.core";
         private const string FikaBridgeAssemblyName = "BodyDragFika.dll";
@@ -46,6 +48,8 @@ namespace BodyDragging
         {
             Log = Logger;
             BindConfig();
+            RuptureDragProvider.Initialize();
+            BodyDragSync.ApplyManagedStatus = CorpseDragController.OnManagedStatus;
             BodyDragSync.ApplyDragDenied = CorpseDragController.OnDragDenied;
             BodyDragSync.ApplyRemotePose = RemoteCorpseDragFollower.ApplyPose;
             BodyDragSync.ApplyRemoteStop = RemoteCorpseDragFollower.ApplyStop;
@@ -89,7 +93,7 @@ namespace BodyDragging
             DebugLogging = Config.Bind("Debug", "Debug Logging", false,
                 "Verbose logging for body-drag state changes.");
             HeadlessApplyFinalPoseOnly = Config.Bind("Fika", "Headless Applies Final Pose Only", true,
-                "On a headless host, skip applying continuous drag poses (no one is watching) and only snap to the final pose when the drag stops, so AI dead-body memory and corpse position stay correct.");
+                "Standalone native path only: on a headless host, skip continuous drag poses and apply the final pose. Rupture-managed corpses always consume intent and simulate on the host.");
         }
 
         // BodyDragFika.dll ships beside this DLL but is never referenced by this assembly, so a
@@ -133,11 +137,14 @@ namespace BodyDragging
         private void Update()
         {
             BodyDragSync.Tick?.Invoke();
+            ManagedDragAuthority.Tick();
             RemoteCorpseDragFollower.Tick();
         }
 
         private void OnDestroy()
         {
+            CorpseDragController.StopActiveDrag();
+            ManagedDragAuthority.ReleaseAll();
             try
             {
                 _fikaBridgeShutdown?.Invoke(null, null);

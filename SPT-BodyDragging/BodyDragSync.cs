@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using BodyDragging.Integration;
 
 namespace BodyDragging
 {
@@ -16,6 +17,12 @@ namespace BodyDragging
         // the bridge's packet handlers can only attach once Fika's network manager exists;
         // the main plugin already runs an Update loop, so it drives the bridge's retry from there
         public static Action Tick;
+
+        public static Func<ManagedDragStart, bool> ManagedStartRequested = ManagedDragAuthority.Begin;
+        public static Action<ManagedDragInput> ManagedInputSent = input => ManagedDragAuthority.Input(input);
+        public static Action<ManagedDragEnd> ManagedEndRequested = ManagedDragAuthority.End;
+        public static Action<ManagedDragStatus> ManagedStatusSent;
+        public static Action<ManagedDragStatus> ApplyManagedStatus;
 
         // outgoing, main plugin -> bridge
         public static Action<string> DragStartRequested;
@@ -35,7 +42,6 @@ namespace BodyDragging
             Active = false;
             IsHost = false;
             HeadlessHost = false;
-            Tick = null;
         }
     }
 

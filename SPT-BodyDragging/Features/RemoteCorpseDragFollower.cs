@@ -5,6 +5,7 @@ using EFT;
 using EFT.Interactive;
 using JsonType;
 using UnityEngine;
+using BodyDragging.Integration;
 
 namespace BodyDragging.Features
 {
@@ -85,6 +86,7 @@ namespace BodyDragging.Features
                 MissRetryAfter[profileId] = now + MissRetryIntervalSeconds;
                 return null;
             }
+            if (RuptureDragProvider.Inspect(corpse, out _) != CorpseRoute.Native) return null;
             // a host relaying/broadcasting its own dragger's pose packets can hand them straight
             // back to that same local client (self-echo) - without this guard, the ~15Hz network
             // pose would fight the local per-frame joint-driven drag on the exact same corpse,
@@ -116,8 +118,11 @@ namespace BodyDragging.Features
             Active.Remove(profileId);
             if (state.Corpse == null)
                 return;
-            state.DetachedWeapon?.RestoreCollisions();
-            CorpseRagdollSettlement.Schedule(state.Corpse, state.Corpse.Ragdoll);
+            if (RuptureDragProvider.Inspect(state.Corpse, out _) == CorpseRoute.Native)
+            {
+                state.DetachedWeapon?.RestoreCollisions();
+                CorpseRagdollSettlement.Schedule(state.Corpse, state.Corpse.Ragdoll);
+            }
             BodyDragLog.Info($"[CorpseDrag] Stopped following remote drag for {profileId}");
         }
 
@@ -140,6 +145,7 @@ namespace BodyDragging.Features
 
         private static void ApplyToCorpse(Corpse corpse, BodyDragPose pose)
         {
+            if (RuptureDragProvider.Inspect(corpse, out _) != CorpseRoute.Native) return;
             RigidbodySpawner[] spawners = corpse.Ragdoll?._rigidbodySpawners;
             if (spawners == null || pose.BonePositions == null || pose.BonePositions.Length != spawners.Length)
                 return;

@@ -5,6 +5,7 @@ using EFT.CameraControl;
 using EFT.Interactive;
 using EFT.InventoryLogic;
 using UnityEngine;
+using BodyDragging.Integration;
 
 namespace BodyDragging.Features
 {
@@ -25,13 +26,12 @@ namespace BodyDragging.Features
     // dynamic joint-driven drag below. Matches why KeepMeAlive's own joint-tether ragdoll (ported
     // from here originally) never explodes: it only ever ragdolls a living player from a calm
     // pose, never a body that just absorbed a death impulse mid-collapse.
-    internal sealed class CorpseDragController : MonoBehaviour
+    internal sealed partial class CorpseDragController : MonoBehaviour
     {
         private const float HeldDistanceBlendDuration = 0.25f;
         private const float EmptyHandsRetryDelay = 0.25f;
         private const float EmptyHandsRequestTimeout = 1.5f;
-        private const float PoseSendInterval = 1f / 15f;
-        // Below this, a body counts as settled rather than still actively falling/flailing.
+        private const float PoseSendInterval = 1f / 15f;        // Below this, a body counts as settled rather than still actively falling/flailing.
         private const float SettleVelocityThreshold = 0.3f;
         private const float SettleAngularVelocityThreshold = 1f;
         // Calm has to hold for a short stretch, not just one lucky frame mid-flail.
@@ -87,10 +87,19 @@ namespace BodyDragging.Features
         private ConfigurableJoint _handJoint;
         private Vector3 _lastHandTarget;
 
+        private bool _managed, _managedReady;
+        private bool _nativeOwnershipStarted;
+        private ManagedDragStart _managedIdentity;
+        private uint _managedStatusSequence, _managedInputSequence;
+        private float _lastManagedStatus;
+        private Vector3 _managedGripPoint;
+        private float _managedBeganAt;
+
         internal static bool IsDragging(Corpse corpse) =>
             _active != null && _active._corpse == corpse;
 
         internal static bool HasActiveDrag => _active != null;
+        internal static bool IsNativeDragging(Corpse corpse) => IsDragging(corpse) && !_active._managed;
 
         internal static void Begin(GamePlayerOwner owner, Corpse corpse)
         {
@@ -115,7 +124,11 @@ namespace BodyDragging.Features
             }
             _active = controller;
             owner.ClearInteractionState();
-            if (BodyDragSync.Active)
+            if (controller._managed)
+            {
+                if (BodyDragSync.ManagedStartRequested?.Invoke(controller._managedIdentity) != true) controller.StopDragging();
+            }
+            else if (BodyDragSync.Active)
                 BodyDragSync.DragStartRequested?.Invoke(corpse.PlayerProfileID);
         }
 
@@ -148,13 +161,25 @@ namespace BodyDragging.Features
             _localPlayer = GamePlayerOwner.MyPlayer;
             _ragdoll = corpse.Ragdoll;
             _camera = CameraManager.Instance?.Camera ?? Camera.main;
-            if (_camera == null || _ragdoll._owner == null ||
-                _ragdoll._rigidbodySpawners == null || _ragdoll._rigidbodySpawners.Length == 0)
+            if (_camera == null || _ragdoll._owner == null)
                 return false;
             if (!Plugin.AllowZombieOrBotCorpses.Value && corpse.IsZombieCorpse)
                 return false;
 
+            CorpseRoute route = RuptureDragProvider.Inspect(corpse, out ProviderInfo info);
+            if (route == CorpseRoute.Blocked || (route == CorpseRoute.Managed && !info.IsAuthority && !BodyDragSync.Active)) return false;
+            if (route == CorpseRoute.Managed)
+            {
+                _managed = true;
+                _managedIdentity = new ManagedDragStart { Session = System.Guid.NewGuid().ToString("N"),
+                    ProfileId = corpse.PlayerProfileID, DeathSequence = info.DeathSequence };
+                _lastManagedStatus = _managedBeganAt = Time.realtimeSinceStartup;
+                return true;
+            }
+            if (_ragdoll._rigidbodySpawners == null || _ragdoll._rigidbodySpawners.Length == 0) return false;
+
             CorpseRagdollSettlement.Cancel(corpse);
+            _nativeOwnershipStarted = true;
             _isSettling = true;
             _settleElapsed = 0f;
             _calmElapsed = 0f;
@@ -581,7 +606,9 @@ namespace BodyDragging.Features
             if (_localPlayer?.MovementContext != null)
                 _localPlayer.MovementContext.EnableSprint(false);
             RequestEmptyHands();
-            if (_isSettling)
+            if (_managed)
+                TickManaged(Time.unscaledDeltaTime);
+            else if (_isSettling)
                 TickSettling(Time.deltaTime);
             else
                 TickDrag(Time.deltaTime);
@@ -601,6 +628,24 @@ namespace BodyDragging.Features
 
         private void OnDestroy()
         {
+            if (_managed)
+            {
+                try
+                {
+                    if (!_claimDenied) BodyDragSync.ManagedEndRequested?.Invoke(new ManagedDragEnd {
+                        Session = _managedIdentity.Session, ProfileId = _managedIdentity.ProfileId, DeathSequence = _managedIdentity.DeathSequence });
+                }
+                catch (System.Exception exception) { BodyDragLog.Warning("[Rupture] End intent send failed: " + exception.Message); }
+                if (_localPlayer != null) _localPlayer.UpdateSpeedLimitByHealth();
+                RestoreLocalPlayerHands();
+                if (_active == this) _active = null;
+                return;
+            }
+            if (!_nativeOwnershipStarted)
+            {
+                if (_active == this) _active = null;
+                return;
+            }
             if (_ragdoll != null && _grabbedBody != null)
                 LogDiagState("release");
             DestroyHand();

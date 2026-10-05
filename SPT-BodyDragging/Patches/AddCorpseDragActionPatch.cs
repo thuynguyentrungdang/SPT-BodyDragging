@@ -5,6 +5,7 @@ using EFT.UI;
 using HarmonyLib;
 using SPT.Reflection.Patching;
 using BodyDragging.Features;
+using BodyDragging.Integration;
 
 namespace BodyDragging.Patches
 {
@@ -41,6 +42,7 @@ namespace BodyDragging.Patches
 
             if (CorpseDragController.HasActiveDrag)
                 return;
+            if (RuptureDragProvider.Inspect(corpse, out _) == CorpseRoute.Blocked) return;
             if (BodyDragSync.Active && BodyDragSync.IsProfileAlreadyDragged?.Invoke(corpse.PlayerProfileID) == true)
                 return;
 
