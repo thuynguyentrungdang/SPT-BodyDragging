@@ -18,6 +18,10 @@ namespace BodyDragging
         // the main plugin already runs an Update loop, so it drives the bridge's retry from there
         public static Action Tick;
 
+        // set by the Fika bridge while the local player drags a downed teammate, so the same
+        // movement slowdown as the corpse drag applies
+        internal static bool ExternalDragActive;
+
         public static Func<ManagedDragStart, bool> ManagedStartRequested = ManagedDragAuthority.Begin;
         public static Action<ManagedDragInput> ManagedInputSent = input => ManagedDragAuthority.Input(input);
         public static Action<ManagedDragEnd> ManagedEndRequested = ManagedDragAuthority.End;

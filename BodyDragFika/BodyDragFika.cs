@@ -53,6 +53,7 @@ namespace BodyDragFika
             BodyDragSync.IsProfileAlreadyDragged = profileId => RemotelyClaimedProfiles.Contains(profileId);
             BodyDragSync.Tick = Tick;
             AttachManagedTransport();
+            InitializeDowned();
 
             _initialized = true;
             _log?.LogInfo("[BodyDragFika] bridge attached, waiting for a raid");
@@ -73,6 +74,7 @@ namespace BodyDragFika
             BodyDragSync.IsProfileAlreadyDragged = null;
             BodyDragSync.Tick = null;
             DetachManagedTransport();
+            ShutdownDowned();
 
             LeaveRaid();
             _initialized = false;
@@ -84,6 +86,7 @@ namespace BodyDragFika
             CorpseDragController.StopActiveDrag();
             ManagedDragAuthority.ReleaseAll();
             ClearManagedClaims();
+            ClearDowned();
             BodyDragSync.LeaveRaid();
             RemoteCorpseDragFollower.ReleaseAll();
             Claims.Clear();
@@ -150,6 +153,7 @@ namespace BodyDragFika
         private static void Tick()
         {
             DrainMainThread();
+            TickDowned();
             if (!BodyDragSync.Active || _registered || Time.time < _nextRetry)
                 return;
             _nextRetry = Time.time + 1f;
@@ -201,6 +205,7 @@ namespace BodyDragFika
                         server.SendData(ref packet, DeliveryMethod.ReliableOrdered, peer);
                     }, epoch));
                     RegisterManagedServer(server, epoch);
+                    RegisterDownedServer(server, epoch);
                 }
                 else
                 {
@@ -228,6 +233,7 @@ namespace BodyDragFika
                         BodyDragSync.ApplyRemoteStop?.Invoke(packet.ProfileId, packet.ToPose());
                     }, epoch));
                     RegisterManagedClient(client, epoch);
+                    RegisterDownedClient(client, epoch);
                 }
                 _registered = true;
                 _log?.LogInfo($"[BodyDragFika] packets registered as {(BodyDragSync.IsHost ? "HOST" : "CLIENT")} - drags ARE synced");

@@ -17,7 +17,7 @@ namespace BodyDragging.Patches
         private static void ApplyDragSpeedPenalty(Player ____player, ref float __result)
         {
             // runs for every player incl. bots every frame - static bool first exits nearly all calls
-            if (!CorpseDragController.HasActiveDrag || __result <= 0f || ____player == null || !____player.IsYourPlayer)
+            if (!(CorpseDragController.HasActiveDrag || BodyDragSync.ExternalDragActive) || __result <= 0f || ____player == null || !____player.IsYourPlayer)
                 return;
 
             __result *= Plugin.DragSpeedMultiplier.Value;
