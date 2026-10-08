@@ -1,0 +1,83 @@
+name: Release
+
+# Push a tag vX.Y.Z (must equal <Version> in SPT-BodyDragging/SPT-BodyDragging.csproj) or run manually.
+# CI has no game files: repo secret SPT_LIBS_URL must point at a zip of the reference DLLs in SPT layout
+#   EscapeFromTarkov_Data/Managed/*, BepInEx/core/*, BepInEx/plugins/spt/*, BepInEx/plugins/Fika/Fika.Core.dll
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, e.g. v1.0.0 (created if missing, from the selected ref)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # A release created by hand (gh release create) also creates the tag and triggers this run.
+      - name: Skip if the release already exists
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -eq 0) { "SKIP=true" | Out-File -FilePath $env:GITHUB_ENV -Append; Write-Host "Release $env:TAG exists - nothing to do." }
+          exit 0
+
+      - uses: actions/setup-dotnet@v4
+        if: env.SKIP != 'true'
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Check tag matches project version
+        if: env.SKIP != 'true'
+        shell: pwsh
+        run: |
+          $version = @(([xml](Get-Content SPT-BodyDragging/SPT-BodyDragging.csproj)).Project.PropertyGroup.Version | Where-Object { $_ })[0]
+          if ("v$version" -ne $env:TAG) { throw "Tag $env:TAG does not match <Version> $version" }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Fetch reference assemblies
+        if: env.SKIP != 'true'
+        shell: pwsh
+        env:
+          SPT_LIBS_URL: ${{ secrets.SPT_LIBS_URL }}
+        run: |
+          if (-not $env:SPT_LIBS_URL) { throw 'Secret SPT_LIBS_URL is not set (zip of SPT reference DLLs).' }
+          $root = Join-Path $env:RUNNER_TEMP 'spt'
+          Invoke-WebRequest -Uri $env:SPT_LIBS_URL -OutFile "$env:RUNNER_TEMP\libs.zip"
+          Expand-Archive "$env:RUNNER_TEMP\libs.zip" -DestinationPath $root -Force
+          "SPT_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build
+        if: env.SKIP != 'true'
+        shell: pwsh
+        run: dotnet build SPT-BodyDragging.slnx -c Release "-p:SptRoot=$env:SPT_ROOT" -p:SkipDeploy=true -p:SkipPackage=true --nologo
+
+      - name: Package
+        if: env.SKIP != 'true'
+        shell: pwsh
+        run: ./scripts/Package-Release.ps1
+
+      - name: Publish release
+        if: env.SKIP != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: BodyDragging ${{ env.VERSION }}
+          generate_release_notes: true
+          files: dist/BodyDragging-${{ env.VERSION }}.zip
+          body: |
+            Extract into the SPT root. Installs `BepInEx/plugins/kobethuy-BodyDragging/`.
+            Fika: same build on every client and the headless host. Downed-player drag needs Fika server revive enabled.
+            Optional Rupture 1.1.6. See README for config and known limits.

@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>BodyDragging.Tests</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RuptureDll Condition="'$(RuptureDll)' == ''">$(SptRoot)\BepInEx\plugins\rupture\Rupture.dll</RuptureDll>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\SPT-BodyDragging\SPT-BodyDragging.csproj" />
+    <ProjectReference Include="..\BodyDragFika\BodyDragFika.csproj" />
+    <Reference Include="Rupture"><HintPath>$(RuptureDll)</HintPath><Private>true</Private></Reference>
+    <Reference Include="Fika.Core"><HintPath>$(SptRoot)\BepInEx\plugins\Fika\Fika.Core.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="Mono.Cecil"><HintPath>$(SptRoot)\BepInEx\core\Mono.Cecil.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="Assembly-CSharp"><HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\Assembly-CSharp.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="UnityEngine"><HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\UnityEngine.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\UnityEngine.CoreModule.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="UnityEngine.PhysicsModule"><HintPath>$(SptRoot)\EscapeFromTarkov_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="BepInEx"><HintPath>$(SptRoot)\BepInEx\core\BepInEx.dll</HintPath><Private>true</Private></Reference>
+  </ItemGroup>
+  <Target Name="ValidateRupture" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(RuptureDll)')" Text="Pass RuptureDll for an ABI V1 Rupture build." />
+  </Target>
+</Project>
