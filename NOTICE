@@ -9,3 +9,12 @@ CorpseRagdollSettlement, RagdollJointStability, and the chest-anchor lookup and 
 built on them) is a derivative work ported from TraumaCore's WoundInspection feature set. Files
 have been modified: trimmed to the drag-only subset, decoupled from TraumaCore's own plugin
 config/logging, and extended with Fika multiplayer sync (BodyDragSync, BodyDragFika).
+
+The downed-player drag (BodyDragFika/DownedDrag.cs, DownedRagdollDrive.cs) uses techniques and
+constants from KeepMeAlive (https://github.com/awnova/KeepMeAlive), licensed under the MIT License:
+Copyright (c) awnova, KaiKiNoodles (original RevivalMod), thuynguyentrungdang (BringMeToLifeMod).
+The trail-point follow math, the owner-side DirectApplyMotion walk, the kinematic hand tether and
+the detach-from-root handling are re-implemented from its DownedDragController and BodyRagdoll.
+
+The optional Rupture integration (SPT-BodyDragging/Integration, BodyDragFika/ManagedDrag*) was
+contributed by rootdarkarchon against Rupture's corpse drag ABI V1.

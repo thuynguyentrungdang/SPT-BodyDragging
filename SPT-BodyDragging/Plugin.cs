@@ -17,7 +17,7 @@ namespace BodyDragging
     {
         public const string Guid = "com.kobethuy.bodydragging";
         public const string Name = "BodyDragging";
-        public const string Version = "1.0.2";
+        public const string Version = "1.0.0";
 
         private const string FikaPluginGuid = "com.fika.core";
         private const string FikaBridgeAssemblyName = "BodyDragFika.dll";
