@@ -126,7 +126,7 @@ namespace BodyDragging.Features
             BodyDragLog.Info($"[CorpseDrag] Stopped following remote drag for {profileId}");
         }
 
-        private static Corpse FindCorpse(string profileId)
+        internal static Corpse FindCorpse(string profileId)
         {
             if (Singleton<GameWorld>.Instantiated)
             {

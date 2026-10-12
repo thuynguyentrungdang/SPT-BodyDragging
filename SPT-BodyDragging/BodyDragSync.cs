@@ -38,6 +38,15 @@ namespace BodyDragging
         public static Action<string, BodyDragPose> ApplyRemotePose;
         public static Action<string, BodyDragPose> ApplyRemoteStop;
 
+        // left-arm "one-handed weapon" pose of a dragger (see DragHands): local state out, remote in
+        // args: pose on, profile id of the body being dragged (grip target for the wrist IK)
+        public static Action<bool, string> HandPoseSent;
+        public static Action<string, bool, string> ApplyRemoteHandPose;
+
+        // bridge-provided lookups for a Fika downed player's local ragdoll (no Fika types here)
+        public static Func<string, Rigidbody> ResolveDownedChest;
+        public static Func<Collider, bool> IsDraggedDownedCollider;
+
         // bridge asks before granting a claim locally observed as free
         public static Func<string, bool> IsProfileAlreadyDragged;
 

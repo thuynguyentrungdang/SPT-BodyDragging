@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using BodyDragging;
+using BodyDragging.Features;
 using Comfort.Common;
 using EFT;
 using EFT.Interactive;
@@ -100,7 +101,7 @@ namespace BodyDragFika
         private static readonly Dictionary<string, DownedClaim> DownedClaims = new();
         private static readonly List<string> DownedScratch = new();
         private static string _draggingDowned;
-        private static Item _previousHandsItem;
+        private static readonly object DownedHandsOwner = new object();
         private static float _nextDownedBeat;
         private static Harmony _downedHarmony;
         private static Type _reviveType;
@@ -130,6 +131,8 @@ namespace BodyDragFika
                     prefix: new HarmonyMethod(typeof(BodyDragFikaBridge), nameof(DownedToggleDownedPrefix)));
                 _downedHarmony.Patch(AccessTools.Method(typeof(Player), nameof(Player.OnDead)),
                     prefix: new HarmonyMethod(typeof(BodyDragFikaBridge), nameof(DownedOnDeadPrefix)));
+                BodyDragSync.ResolveDownedChest = DownedChestFor;
+                BodyDragSync.IsDraggedDownedCollider = IsDraggedDownedCollider;
                 _log?.LogInfo("[BodyDragFika] downed-player drag hooks installed");
             }
             catch (Exception ex)
@@ -139,8 +142,25 @@ namespace BodyDragFika
             }
         }
 
+        private static Rigidbody DownedChestFor(string downedId) =>
+            DownedClaims.TryGetValue(downedId, out DownedClaim claim) ? claim.Drive?.ChestBody : null;
+
+        // own armed shots pass through the downed player being dragged: its ragdoll bodies and
+        // its (frozen, trailing) player hit colliders
+        private static bool IsDraggedDownedCollider(Collider collider)
+        {
+            if (_draggingDowned == null || collider == null || !DownedClaims.TryGetValue(_draggingDowned, out DownedClaim claim))
+                return false;
+            if (claim.Drive != null && claim.Drive.Owns(collider.attachedRigidbody))
+                return true;
+            Player owner = collider.GetComponentInParent<Player>();
+            return owner != null && owner.ProfileId == _draggingDowned;
+        }
+
         private static void ShutdownDowned()
         {
+            BodyDragSync.ResolveDownedChest = null;
+            BodyDragSync.IsDraggedDownedCollider = null;
             ClearDowned();
             _downedHarmony?.UnpatchSelf();
             _downedHarmony = null;
@@ -153,6 +173,7 @@ namespace BodyDragFika
             DownedClaims.Clear();
             _draggingDowned = null;
             BodyDragSync.ExternalDragActive = false;
+            DragHands.Abandon(DownedHandsOwner);
         }
 
         private static void RegisterDownedServer(FikaServer server, int epoch) =>
@@ -192,23 +213,9 @@ namespace BodyDragFika
             {
                 _draggingDowned = null;
                 BodyDragSync.ExternalDragActive = false;
-                RestoreHands();
+                // any end of the local drag (release, target revived/died/gone, leash) re-equips what was stowed
+                DragHands.End(DownedHandsOwner);
             }
-        }
-
-        // Any end of the local drag (release, target revived/died/gone, leash) re-equips what was stowed.
-        private static void RestoreHands()
-        {
-            Item item = _previousHandsItem;
-            _previousHandsItem = null;
-            Player me = GamePlayerOwner.MyPlayer;
-            if (item == null || me == null || !me.HealthController.IsAlive || !me.IsItemCanBeEquipped(item))
-                return;
-            me.TryProceed(item, result =>
-            {
-                if (!string.IsNullOrEmpty(result.Error))
-                    _log?.LogWarning($"[BodyDragFika] could not re-equip after drag: {result.Error}");
-            });
         }
 
         private static void SendDowned(byte op, string downed, string dragger)
@@ -229,14 +236,8 @@ namespace BodyDragFika
                 return;
             if (DownedClaims.ContainsKey(downed.ProfileId))
                 return;
-            // remember what was in hand (as the corpse drag does) so releasing puts it back
-            _previousHandsItem = null;
-            if (!me.HandsIsEmpty)
-            {
-                me.TrySaveLastItemInHands();
-                _previousHandsItem = me.LastEquippedWeaponOrKnifeItem;
-                me.SetEmptyHands(null);
-            }
+            // same hands handling as the corpse drag: armed one-handed pose or empty hands, restored on release
+            DragHands.Begin(me, DownedHandsOwner, downed.ProfileId);
             _draggingDowned = downed.ProfileId;
             BodyDragSync.ExternalDragActive = true;
             ApplyDowned(new DownedDragPacket { Op = DownedDragPacket.Start, Downed = downed.ProfileId, Dragger = me.ProfileId });
@@ -275,6 +276,7 @@ namespace BodyDragFika
             if (_draggingDowned != null)
             {
                 string reason = null;
+                DragHands.Tick();
                 Player target = FindPlayer(_draggingDowned);
                 if (me == null || !me.HealthController.IsAlive)
                     reason = "dragger-down";

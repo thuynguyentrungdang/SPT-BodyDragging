@@ -50,6 +50,7 @@ namespace BodyDragFika
             BodyDragSync.DragStartRequested += OnLocalDragStartRequested;
             BodyDragSync.PoseSent += OnLocalPoseSent;
             BodyDragSync.DragStoppedLocally += OnLocalDragStopped;
+            BodyDragSync.HandPoseSent += OnLocalHandPose;
             BodyDragSync.IsProfileAlreadyDragged = profileId => RemotelyClaimedProfiles.Contains(profileId);
             BodyDragSync.Tick = Tick;
             AttachManagedTransport();
@@ -71,6 +72,7 @@ namespace BodyDragFika
             BodyDragSync.DragStartRequested -= OnLocalDragStartRequested;
             BodyDragSync.PoseSent -= OnLocalPoseSent;
             BodyDragSync.DragStoppedLocally -= OnLocalDragStopped;
+            BodyDragSync.HandPoseSent -= OnLocalHandPose;
             BodyDragSync.IsProfileAlreadyDragged = null;
             BodyDragSync.Tick = null;
             DetachManagedTransport();
@@ -87,6 +89,7 @@ namespace BodyDragFika
             ManagedDragAuthority.ReleaseAll();
             ClearManagedClaims();
             ClearDowned();
+            DragHands.ClearRemote();
             BodyDragSync.LeaveRaid();
             RemoteCorpseDragFollower.ReleaseAll();
             Claims.Clear();
@@ -206,6 +209,7 @@ namespace BodyDragFika
                     }, epoch));
                     RegisterManagedServer(server, epoch);
                     RegisterDownedServer(server, epoch);
+                    RegisterHandsServer(server, epoch);
                 }
                 else
                 {
@@ -234,6 +238,7 @@ namespace BodyDragFika
                     }, epoch));
                     RegisterManagedClient(client, epoch);
                     RegisterDownedClient(client, epoch);
+                    RegisterHandsClient(client, epoch);
                 }
                 _registered = true;
                 _log?.LogInfo($"[BodyDragFika] packets registered as {(BodyDragSync.IsHost ? "HOST" : "CLIENT")} - drags ARE synced");

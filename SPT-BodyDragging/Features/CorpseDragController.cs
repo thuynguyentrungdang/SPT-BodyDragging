@@ -29,8 +29,6 @@ namespace BodyDragging.Features
     internal sealed partial class CorpseDragController : MonoBehaviour
     {
         private const float HeldDistanceBlendDuration = 0.25f;
-        private const float EmptyHandsRetryDelay = 0.25f;
-        private const float EmptyHandsRequestTimeout = 1.5f;
         private const float PoseSendInterval = 1f / 15f;        // Below this, a body counts as settled rather than still actively falling/flailing.
         private const float SettleVelocityThreshold = 0.3f;
         private const float SettleAngularVelocityThreshold = 1f;
@@ -73,12 +71,6 @@ namespace BodyDragging.Features
         private bool _claimDenied;
         private CorpseWeaponLink.DetachedWeapon _detachedWeapon;
         private Player _localPlayer;
-        private Item _previousHandsItem;
-        private bool _shouldRestoreHands;
-        private bool _shouldEnforceEmptyHands;
-        private bool _isEmptyHandsRequestPending;
-        private float _nextEmptyHandsRequestTime;
-        private float _emptyHandsRequestExpires;
         private float _nextPoseSendTime;
         private uint _poseSequence;
         private Vector3 _grabbedBodyPositionAtCapture;
@@ -280,8 +272,7 @@ namespace BodyDragging.Features
             _grabHeightAtCapture = worldPoint.y;
             CreateHand(worldPoint);
             LogDiagState("capture");
-            if (Plugin.UnequipHandsWhileDragging.Value)
-                UnequipLocalPlayerHands();
+            DragHands.Begin(_localPlayer, this, _corpse.PlayerProfileID);
             BodyDragLog.Info(
                 $"[CorpseDrag] Grabbed '{_grabbedBody.name}' at {_initialGrabDistance:F2}m, blending to " +
                 $"{_targetGrabDistance:F2}m inside EFT interaction range {interactionRange:F2}m");
@@ -301,53 +292,16 @@ namespace BodyDragging.Features
             PhysicsExtensions.UpdateController.SupportRigidbody(body, 0f);
         }
 
-        private void UnequipLocalPlayerHands()
+        internal static bool IsDraggedCollider(Collider collider)
         {
-            if (_localPlayer == null)
-                return;
-
-            if (!_localPlayer.HandsIsEmpty)
-            {
-                _localPlayer.TrySaveLastItemInHands();
-                _previousHandsItem = _localPlayer.LastEquippedWeaponOrKnifeItem;
-                _shouldRestoreHands = _previousHandsItem != null;
-            }
-            _shouldEnforceEmptyHands = true;
-            RequestEmptyHands();
-        }
-
-        private void RequestEmptyHands()
-        {
-            if (!_shouldEnforceEmptyHands || _localPlayer == null ||
-                _localPlayer.HandsIsEmpty || Time.unscaledTime < _nextEmptyHandsRequestTime)
-                return;
-            if (_isEmptyHandsRequestPending && Time.unscaledTime < _emptyHandsRequestExpires)
-                return;
-
-            _isEmptyHandsRequestPending = true;
-            _nextEmptyHandsRequestTime = Time.unscaledTime + EmptyHandsRetryDelay;
-            _emptyHandsRequestExpires = Time.unscaledTime + EmptyHandsRequestTimeout;
-            _localPlayer.SetEmptyHands(result =>
-            {
-                _isEmptyHandsRequestPending = false;
-                if (!string.IsNullOrEmpty(result.Error))
-                    BodyDragLog.Warning($"[CorpseDrag] Empty-hands transition failed: {result.Error}");
-            });
-        }
-
-        private void RestoreLocalPlayerHands()
-        {
-            _shouldEnforceEmptyHands = false;
-            if (!_shouldRestoreHands || _localPlayer == null || _previousHandsItem == null)
-                return;
-            _shouldRestoreHands = false;
-            if (!_localPlayer.IsItemCanBeEquipped(_previousHandsItem))
-                return;
-            _localPlayer.TryProceed(_previousHandsItem, result =>
-            {
-                if (!string.IsNullOrEmpty(result.Error))
-                    BodyDragLog.Warning($"[CorpseDrag] Previous-item equip failed: {result.Error}");
-            });
+            RigidbodySpawner[] spawners = _active?._ragdoll?._rigidbodySpawners;
+            Rigidbody body = collider != null ? collider.attachedRigidbody : null;
+            if (spawners == null || body == null)
+                return false;
+            foreach (RigidbodySpawner spawner in spawners)
+                if (spawner != null && spawner.Rigidbody == body)
+                    return true;
+            return false;
         }
 
         private void ActivateRagdoll()
@@ -605,7 +559,8 @@ namespace BodyDragging.Features
         {
             if (_localPlayer?.MovementContext != null)
                 _localPlayer.MovementContext.EnableSprint(false);
-            RequestEmptyHands();
+            if (_active == this)
+                DragHands.Tick();
             if (_managed)
                 TickManaged(Time.unscaledDeltaTime);
             else if (_isSettling)
@@ -637,7 +592,7 @@ namespace BodyDragging.Features
                 }
                 catch (System.Exception exception) { BodyDragLog.Warning("[Rupture] End intent send failed: " + exception.Message); }
                 if (_localPlayer != null) _localPlayer.UpdateSpeedLimitByHealth();
-                RestoreLocalPlayerHands();
+                DragHands.End(this);
                 if (_active == this) _active = null;
                 return;
             }
@@ -661,7 +616,7 @@ namespace BodyDragging.Features
                 }
             if (_localPlayer != null)
                 _localPlayer.UpdateSpeedLimitByHealth();
-            RestoreLocalPlayerHands();
+            DragHands.End(this);
             _detachedWeapon?.RestoreCollisions();
             if (_corpse != null)
             {

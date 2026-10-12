@@ -45,6 +45,9 @@ internal static class Program
             "observer hold is min(0.5m, distance) from the root toward the dragger");
         var packet = Roundtrip(new DownedDragPacket { Op=DownedDragPacket.Start, Downed="downed", Dragger="dragger" });
         Check(packet.Op == DownedDragPacket.Start && packet.Downed == "downed" && packet.Dragger == "dragger", "downed-drag claim roundtrip");
+        var hand = Roundtrip(new DragHandPacket { Player="dragger", On=true, Body="body" });
+        var handOff = Roundtrip(new DragHandPacket { Player="dragger", On=false });
+        Check(hand.Player == "dragger" && hand.On && hand.Body == "body" && !handOff.On && handOff.Body == "", "drag hand-pose packet roundtrip");
     }
     private static void TestIntentAndLifetime()
     {

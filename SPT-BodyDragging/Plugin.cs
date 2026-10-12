@@ -37,6 +37,7 @@ namespace BodyDragging
         internal static ConfigEntry<float> LimbFollowStrength { get; private set; }
         internal static ConfigEntry<float> DragSpeedMultiplier { get; private set; }
         internal static ConfigEntry<bool> UnequipHandsWhileDragging { get; private set; }
+        internal static ConfigEntry<ArmedDragMode> ArmedDrag { get; private set; }
         internal static ConfigEntry<bool> AllowZombieOrBotCorpses { get; private set; }
         internal static ConfigEntry<bool> DebugLogging { get; private set; }
         internal static ConfigEntry<bool> HeadlessApplyFinalPoseOnly { get; private set; }
@@ -58,6 +59,7 @@ namespace BodyDragging
             BodyDragSync.ApplyDragDenied = CorpseDragController.OnDragDenied;
             BodyDragSync.ApplyRemotePose = RemoteCorpseDragFollower.ApplyPose;
             BodyDragSync.ApplyRemoteStop = RemoteCorpseDragFollower.ApplyStop;
+            BodyDragSync.ApplyRemoteHandPose = DragHands.ApplyRemote;
 
             _patchManager = new PatchManager(this, autoPatch: true);
             _patchManager.EnablePatches();
@@ -106,6 +108,8 @@ namespace BodyDragging
                 "Movement speed multiplier applied to the local player while dragging.");
             UnequipHandsWhileDragging = Config.Bind("General", "Unequip Hands While Dragging", true,
                 "Empty the local player's hands for the duration of the drag, restoring the previous item afterward.");
+            ArmedDrag = Config.Bind("General", "Armed Drag", ArmedDragMode.PistolOnly,
+                "Keep shooting while dragging: keep (or draw from the holster) a one-handed weapon, left arm raised, other players see the pose. PistolOnly = pistols, AnyWeapon = whatever is in hand, Off = use Unequip Hands While Dragging instead. Hip fire only - aiming brings both hands back onto the weapon. Your shots pass through the body you drag.");
             AllowZombieOrBotCorpses = Config.Bind("General", "Allow Zombie/Bot Corpses", true,
                 "Allow dragging zombie and bot corpses, not just other players.");
             DebugLogging = Config.Bind("Debug", "Debug Logging", false,
@@ -157,6 +161,7 @@ namespace BodyDragging
             BodyDragSync.Tick?.Invoke();
             ManagedDragAuthority.Tick();
             RemoteCorpseDragFollower.Tick();
+            DragHands.TickRemote();
         }
 
         private void OnDestroy()

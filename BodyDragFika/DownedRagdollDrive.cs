@@ -43,6 +43,8 @@ namespace BodyDragFika
         private Vector3 _lastTarget;
 
         internal int BodyCount => _bodies.Count;
+        internal Rigidbody ChestBody => _chest;
+        internal bool Owns(Rigidbody body) => body != null && _bodies.Contains(body);
 
         internal static DownedRagdollDrive TryCreate(CorpseRagdoll ragdoll, string downedId, ManualLogSource log, out string failure)
         {

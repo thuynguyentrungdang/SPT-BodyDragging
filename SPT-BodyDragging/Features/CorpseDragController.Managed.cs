@@ -31,7 +31,7 @@ namespace BodyDragging.Features
             controller._grabHeightAtCapture = status.GripPoint.y;
             controller._managedReady = true;
             BodyDragLog.Info($"[Rupture] timing client: Held status received {(Time.realtimeSinceStartup - controller._managedBeganAt) * 1000f:F0}ms after grab");
-            if (Plugin.UnequipHandsWhileDragging.Value) controller.UnequipLocalPlayerHands();
+            DragHands.Begin(controller._localPlayer, controller, controller._corpse.PlayerProfileID);
             BodyDragLog.Info("[Rupture] Authority drag engaged");
         }
 
