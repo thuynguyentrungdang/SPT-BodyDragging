@@ -172,9 +172,10 @@ namespace BodyDragging.Features
             }
 
             _settleElapsed += deltaTime;
-            _calmElapsed = _body.IsCalm() ? _calmElapsed + deltaTime : 0f;
+            bool calm = _body.IsCalm();
+            _calmElapsed = calm ? _calmElapsed + deltaTime : 0f;
 
-            if (_calmElapsed < NativeDragBody.RequiredCalmSeconds && _settleElapsed < NativeDragBody.MaxSettleWaitSeconds)
+            if (!_body.ReadyToEngage(calm, _calmElapsed, _settleElapsed))
                 return;
 
             NativeDragBody.EngageResult result = EngageDrag();

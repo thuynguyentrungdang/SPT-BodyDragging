@@ -67,6 +67,12 @@ namespace BodyDragging.Features
 
         internal enum EngageResult { Engaged, Pending, Failed }
 
+        // Settle gate shared by the local drag and the remote simulation. Handoff: Rupture's Simulating flag is already
+        // binary and Release quiesces the body, so engage the moment it is not simulating (no calm-time accumulation).
+        // Otherwise: calm for RequiredCalmSeconds. Either way MaxSettleWaitSeconds ends the wait.
+        internal bool ReadyToEngage(bool calm, float calmElapsed, float settleElapsed) =>
+            settleElapsed >= MaxSettleWaitSeconds || (_handoff ? calm : calmElapsed >= RequiredCalmSeconds);
+
         internal bool UsesHandoff => _handoff;
         internal bool IsEngaged => _grabbedBody != null;
         internal Rigidbody GrabbedBody => _grabbedBody;

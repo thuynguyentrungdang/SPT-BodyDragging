@@ -228,8 +228,9 @@ namespace BodyDragging.Features
             if (state.Corpse == null || state.Corpse.Ragdoll?._rigidbodySpawners == null)
                 return true;
             state.SettleElapsed += deltaTime;
-            state.CalmElapsed = state.Body.IsCalm() ? state.CalmElapsed + deltaTime : 0f;
-            if (state.CalmElapsed < NativeDragBody.RequiredCalmSeconds && state.SettleElapsed < NativeDragBody.MaxSettleWaitSeconds)
+            bool calm = state.Body.IsCalm();
+            state.CalmElapsed = calm ? state.CalmElapsed + deltaTime : 0f;
+            if (!state.Body.ReadyToEngage(calm, state.CalmElapsed, state.SettleElapsed))
                 return false;
             NativeDragBody.EngageResult result = state.Body.TryEngage();
             if (result == NativeDragBody.EngageResult.Pending)
