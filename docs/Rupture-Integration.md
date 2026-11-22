@@ -10,7 +10,7 @@ Managed dragging retains the local camera/yaw target, distance blend, capture he
 
 Solo runs the authority controller directly. Fika sends begin, target/heartbeat and end intent to the host. There are no managed bone-pose packets. The host associates each accepted claim with a local ABI lease and the exact session/profile/death identity. Input and end must match the originating peer. Queued callbacks recheck ownership on the plugin's main thread; callbacks from an earlier raid are dropped. Denials go only to the requesting peer.
 
-The authority controller runs from `Plugin.Update` on graphical and headless hosts. It has no camera or local-player dependency. `HeadlessApplyFinalPoseOnly` applies only to the standalone native pose route. Rupture continues publishing corpse motion to observers through its own Fika stream.
+The authority controller runs from `Plugin.Update` on graphical and headless hosts. It has no camera or local-player dependency. The standalone native route no longer streams poses (peers simulate their own copy; a headless host only applies the final rest pose). Rupture continues publishing corpse motion to observers through its own Fika stream.
 
 The authority waits briefly for calm using actual solver velocities, with a three-second wait cap. The caller sends heartbeats during this preparation. No fresh input for two seconds releases the lease; preparation is capped at six seconds. Release keeps the claim reserved until the ABI reports completion, with a bounded fallback if the solver cannot progress. Disconnect, game exit and shutdown release authority sessions. Native activation rejection does not schedule native settlement.
 
@@ -35,6 +35,26 @@ dotnet build SPT-BodyDragging.slnx -c Release -p:SptRoot=D:\Tarkov-SPT-4.1 -p:Sk
 ```
 
 Replace both `BodyDragging.dll` and `BodyDragFika.dll` in the existing BodyDragging plugin directory with the matching build outputs. These build flags deliberately skip deployment and release ZIP generation. Extract the canonical Rupture 1.1.6 package into each test installation. A solo installation does not need Fika; the Fika bridge remains dynamically loaded only when Fika is present.
+
+## Handoff route (Rupture 1.4.0+, `CorpseHandoffV1`, default on)
+
+`Use Handoff Drag` (default true) prefers this route over `CorpseDragV1` when Rupture exposes the handoff ABI. Rupture older than 1.4.0, or the config off, keeps the managed route above. Versions must match on all peers and the headless host; the wire is unchanged (no route byte): observers decide from `Inspect`, the dragger's config only affects the dragger.
+
+Routes: `Native` (no Rupture / unmanaged), `Managed` (CorpseDragV1), `Handoff`, `Blocked` (preparing, unavailable, released to someone else). Managed corpse + handoff available = `Handoff`.
+
+Life cycle (`HandoffLeases`, one token per corpse per peer, main thread only):
+
+| Step | Behaviour |
+| --- | --- |
+| Pickup | Wait until `Inspect.Simulating` is false (replaces the velocity gate), `Release` with a 30 s lease, wait up to 6 s for state `Released`. Not released = token closed with `Adopt`. |
+| Held | `Renew` every 1 s. A failed renew drops the lease (Rupture already adopted it). Body runs as in the native route, minus `ActivateRagdoll`/`TakeOver`/settlement; severed bone subtrees are skipped; weapon detach skipped when `WeaponIndependent`. |
+| Drop (dropper) | Settles 0.3-3 s, sends `DragRest`, bodies back to kinematic + unsupported, one `Adopt` (polled up to 10 s on `Pending`). |
+| Drop (others) | Wait for the rest pose (8 s graphical, 12 s headless); apply it with collider materials restored, `Adopt`. No pose in time = adopt at own pose. |
+| Headless | Releases/renews/adopts too, but never simulates the hold; otherwise Rupture's authority keeps the pickup pose and clients snap back. |
+| Re-grab inside the drop window | Reuses the same token (`Release` would report Busy). |
+| Exit | Raid end, plugin destroy, `BodyDragFika.LeaveRaid`: `AdoptAll`. Lease expiry makes Rupture adopt by itself. |
+
+Open (not live-tested): native colliders/joints left active after `Release`; Adopt strip of our dynamic bodies; early-raid corpse still baking when picked up. `[Handoff]` log lines (debug logging) and `NativeDragBody.LogHandoffState` report the state.
 
 ## Executable checks
 

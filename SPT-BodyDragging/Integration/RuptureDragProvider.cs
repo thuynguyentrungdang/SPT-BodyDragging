@@ -7,7 +7,9 @@ using UnityEngine;
 
 namespace BodyDragging.Integration
 {
-    internal enum CorpseRoute { Native, Managed, Blocked }
+    // Native: no Rupture claim, BodyDragging's own physics. Managed: Rupture's solver drags (CorpseDragV1).
+    // Handoff: Rupture lets go and BodyDragging runs the native drag on every peer (CorpseHandoffV1).
+    internal enum CorpseRoute { Native, Managed, Handoff, Blocked }
     internal enum ProviderResult { Ok, Pending, Closed, NotManaged, NotAuthority, Busy, InvalidArgument, InvalidLease, Unsupported, Failed, Stale }
     internal struct ProviderInfo { internal bool IsAuthority; internal uint DeathSequence; }
     internal struct ProviderBody
@@ -80,7 +82,36 @@ namespace BodyDragging.Integration
             try { return (ProviderResult)Convert.ToInt32(method.Invoke(null, args)); }
             catch (Exception exception) { Fail(exception); return ProviderResult.Failed; }
         }
-        internal static CorpseRoute Inspect(Corpse corpse, out ProviderInfo info)
+        // handoff: null = the local dragger's own choice (config, plus API availability). Peers that only follow a drag
+        // somebody else started pass true: they take the corpse by handoff whenever Rupture offers it, whatever their
+        // own setting. false = Rupture's CorpseDragV1 view only.
+        internal static CorpseRoute Inspect(Corpse corpse, out ProviderInfo info, bool? handoff = null)
+        {
+            info = default;
+            if (RuptureHandoffProvider.Available && (handoff ?? Plugin.UseHandoff?.Value ?? true))
+            {
+                CorpseRoute? route = InspectHandoff(corpse);
+                if (route.HasValue) return route.Value;
+            }
+            return InspectManaged(corpse, out info);
+        }
+
+        // null: no handoff verdict, fall back to CorpseDragV1
+        private static CorpseRoute? InspectHandoff(Corpse corpse)
+        {
+            if (HandoffLeases.Holds(corpse)) return CorpseRoute.Handoff;
+            HandoffCode code = RuptureHandoffProvider.Inspect(corpse, out HandoffInfo state);
+            if (code == HandoffCode.NotManaged) return CorpseRoute.Native;
+            if (code != HandoffCode.Ok || state == null) return CorpseRoute.Blocked;
+            switch (state.State)
+            {
+                case HandoffState.Unmanaged: return CorpseRoute.Native;
+                case HandoffState.Managed: return CorpseRoute.Handoff;
+                default: return CorpseRoute.Blocked; // preparing, unavailable, or released to someone else
+            }
+        }
+
+        private static CorpseRoute InspectManaged(Corpse corpse, out ProviderInfo info)
         {
             info = default;
             if (!_present) return CorpseRoute.Native;

@@ -40,7 +40,7 @@ namespace BodyDragging
         internal static ConfigEntry<ArmedDragMode> ArmedDrag { get; private set; }
         internal static ConfigEntry<bool> AllowZombieOrBotCorpses { get; private set; }
         internal static ConfigEntry<bool> DebugLogging { get; private set; }
-        internal static ConfigEntry<bool> HeadlessApplyFinalPoseOnly { get; private set; }
+        internal static ConfigEntry<bool> UseHandoff { get; private set; }
         internal static ConfigEntry<float> RemoteTargetSmoothing { get; private set; }
         internal static ConfigEntry<float> HoldPoseYawFollow { get; private set; }
         internal static ConfigEntry<bool> GroundFollowHold { get; private set; }
@@ -55,10 +55,13 @@ namespace BodyDragging
             Log = Logger;
             BindConfig();
             RuptureDragProvider.Initialize();
+            RuptureHandoffProvider.Initialize();
             BodyDragSync.ApplyManagedStatus = CorpseDragController.OnManagedStatus;
             BodyDragSync.ApplyDragDenied = CorpseDragController.OnDragDenied;
-            BodyDragSync.ApplyRemotePose = RemoteCorpseDragFollower.ApplyPose;
-            BodyDragSync.ApplyRemoteStop = RemoteCorpseDragFollower.ApplyStop;
+            BodyDragSync.ApplyRemoteStart = RemoteCorpseDragSim.ApplyStart;
+            BodyDragSync.ApplyRemoteHold = RemoteCorpseDragSim.ApplyHold;
+            BodyDragSync.ApplyRemoteStop = RemoteCorpseDragSim.ApplyStop;
+            BodyDragSync.ApplyRemoteRest = RemoteCorpseDragSim.ApplyRest;
             BodyDragSync.ApplyRemoteHandPose = DragHands.ApplyRemote;
 
             _patchManager = new PatchManager(this, autoPatch: true);
@@ -91,6 +94,8 @@ namespace BodyDragging
                 "Seconds the corpse may stay outside interaction range before being released.");
             LimbFollowStrength = Config.Bind("Physics", "Limb Follow Strength", 0.5f,
                 "Fraction of Grab Spring applied directly to every other ragdoll body (not just the grabbed one), closing the speed gap between torso and limbs. 0 = limbs only follow through joints (old behavior).");
+            UseHandoff = Config.Bind("Rupture", "Use Handoff Drag", true,
+                "Rupture 1.4.0+ only. Rupture lets go of the corpse on every peer while it is dragged, the drag runs as in a Rupture-less game (each player simulates their own copy, held by the dragger) and Rupture takes the body back at the pose where it was put down. Smooth for client draggers and no host-side lag. Only the dragger's setting matters; everyone else follows. Off = Rupture's own solver drags the body (the other Rupture settings here). Falls back to that automatically when Rupture is older.");
             RemoteTargetSmoothing = Config.Bind("Rupture", "Remote Target Smoothing", 0.08f,
                 new ConfigDescription("Rupture-managed corpses only, read on the authority (host/headless): smoothing time in seconds for the hold target when the dragger is a remote Fika client. 0 = off. Local/solo drags are never smoothed.",
                     new AcceptableValueRange<float>(0f, 0.3f)));
@@ -109,13 +114,11 @@ namespace BodyDragging
             UnequipHandsWhileDragging = Config.Bind("General", "Unequip Hands While Dragging", true,
                 "Empty the local player's hands for the duration of the drag, restoring the previous item afterward.");
             ArmedDrag = Config.Bind("General", "Armed Drag", ArmedDragMode.PistolOnly,
-                "Keep shooting while dragging: keep (or draw from the holster) a one-handed weapon, left arm raised, other players see the pose. PistolOnly = pistols, AnyWeapon = whatever is in hand, Off = use Unequip Hands While Dragging instead. Hip fire only - aiming brings both hands back onto the weapon. Your shots pass through the body you drag.");
+                "Keep shooting while dragging: keep (or draw from the holster) a one-handed weapon, left arm raised, other players see the pose. PistolOnly = pistols, AnyWeapon = whatever is in hand, Off = use Unequip Hands While Dragging instead. Pistols can ADS one-handed (the left hand stays on the body); other weapons are hip fire only. Your shots pass through the body you drag.");
             AllowZombieOrBotCorpses = Config.Bind("General", "Allow Zombie/Bot Corpses", true,
                 "Allow dragging zombie and bot corpses, not just other players.");
             DebugLogging = Config.Bind("Debug", "Debug Logging", false,
                 "Verbose logging for body-drag state changes.");
-            HeadlessApplyFinalPoseOnly = Config.Bind("Fika", "Headless Applies Final Pose Only", true,
-                "Standalone native path only: on a headless host, skip continuous drag poses and apply the final pose. Rupture-managed corpses always consume intent and simulate on the host.");
         }
 
         // BodyDragFika.dll ships beside this DLL but is never referenced by this assembly, so a
@@ -160,7 +163,9 @@ namespace BodyDragging
         {
             BodyDragSync.Tick?.Invoke();
             ManagedDragAuthority.Tick();
-            RemoteCorpseDragFollower.Tick();
+            RemoteCorpseDragSim.Tick();
+            CorpseRestDeclarer.Tick();
+            HandoffLeases.Tick();
             DragHands.TickRemote();
         }
 
@@ -168,6 +173,8 @@ namespace BodyDragging
         {
             CorpseDragController.StopActiveDrag();
             ManagedDragAuthority.ReleaseAll();
+            RemoteCorpseDragSim.ReleaseAll();
+            HandoffLeases.AdoptAll();
             try
             {
                 _fikaBridgeShutdown?.Invoke(null, null);

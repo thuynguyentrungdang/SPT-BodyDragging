@@ -28,15 +28,21 @@ namespace BodyDragging
         public static Action<ManagedDragStatus> ManagedStatusSent;
         public static Action<ManagedDragStatus> ApplyManagedStatus;
 
+        // Native drag: no pose stream. Every peer simulates its own copy of the body, held by the
+        // dragger's synced position plus the hold parameters below; the peer that lets go sends one
+        // rest (the settled pose) so all copies end up the same.
         // outgoing, main plugin -> bridge
         public static Action<string> DragStartRequested;
-        public static Action<BodyDragPose> PoseSent;
-        public static Action<string, BodyDragPose> DragStoppedLocally;
+        public static Action<BodyDragHold> HoldSent;
+        public static Action<string> DragStoppedLocally;
+        public static Action<BodyDragRest> RestDeclared;
 
         // incoming, bridge -> main plugin
         public static Action<string> ApplyDragDenied;
-        public static Action<string, BodyDragPose> ApplyRemotePose;
-        public static Action<string, BodyDragPose> ApplyRemoteStop;
+        public static Action<string, string> ApplyRemoteStart;   // corpse profile id, dragger profile id
+        public static Action<BodyDragHold> ApplyRemoteHold;
+        public static Action<string> ApplyRemoteStop;
+        public static Action<BodyDragRest> ApplyRemoteRest;
 
         // left-arm "one-handed weapon" pose of a dragger (see DragHands): local state out, remote in
         // args: pose on, profile id of the body being dragged (grip target for the wrist IK)
@@ -58,11 +64,24 @@ namespace BodyDragging
         }
     }
 
-    public struct BodyDragPose
+    // The dragger's hold, in the dragger's yaw frame: target = root + R(Yaw) * (LocalX, 0, LocalZ + Distance),
+    // height = root.y + HeightOffset (see RemoteHoldMath).
+    public struct BodyDragHold
     {
         public string ProfileId;
         public uint Sequence;
-        public Vector3 Pelvis;
+        public float Yaw;
+        public float Distance;
+        public float LocalX;
+        public float LocalZ;
+        public float HeightOffset;
+    }
+
+    // Where a let-go body came to rest on the peer that dropped it: corpse root and every ragdoll bone.
+    public struct BodyDragRest
+    {
+        public string ProfileId;
+        public Vector3 Root;
         public Vector3[] BonePositions;
         public Quaternion[] BoneRotations;
     }

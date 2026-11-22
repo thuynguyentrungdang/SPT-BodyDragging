@@ -6,9 +6,9 @@ Drag corpses and downed teammates in SPT 4.1 (Single Player Tushonka). Real ragd
 
 - **Corpse drag.** Corpse menu → `DRAG BODY`. Chest tethered to a kinematic hand; limbs follow, joints repaired when snagged.
 - **Downed-teammate drag.** Fika revive menu → `DRAG BODY` / `RELEASE`. Downed player walks with you, ragdoll pulled on every peer, `Revive` greyed while dragging. Revive afterwards stands them up where dragged.
-- **Fika sync.** Optional bridge, loads only if Fika present. Claims, poses, release, disconnect handled.
-- **Rupture support.** Rupture-managed corpses dragged through Rupture's corpse-drag ABI (host-authoritative). Standalone physics otherwise.
-- **Armed drag.** Shoot one-handed while dragging: pistol kept or drawn, left arm raised onto the body (other players see it), hip fire only (ADS blocked), your shots pass through the body you drag.
+- **Fika sync.** Optional bridge, loads only if Fika present. Claims, release, disconnect handled. Standalone corpses: no bone stream - every peer simulates its own copy held by the dragger's position, and the settled pose is sent once on release so all copies match.
+- **Rupture support.** Rupture 1.4.0+: handoff drag (Rupture releases the corpse, standalone physics runs it, Rupture re-adopts at the rest pose). Older Rupture: managed drag via its corpse-drag ABI (host-authoritative). Standalone physics without Rupture.
+- **Armed drag.** Shoot one-handed while dragging: pistol kept or drawn, left arm raised onto the body (other players see it), pistols can ADS one-handed (other weapons hip fire only), no reloading while dragging, your shots pass through the body you drag.
 - **Feel.** Slowed movement while dragging, weapon stowed and re-equipped, auto-release on distance.
 - **Tunable.** Hand speed, grip, limb spring, held distance, speed penalty. All in BepInEx config.
 
@@ -18,7 +18,7 @@ Drag corpses and downed teammates in SPT 4.1 (Single Player Tushonka). Real ragd
 |---|---|
 | SPT | 4.1.x (Tushonka), BepInEx 5 |
 | Fika | Optional. 2.4.x. Same mod build on every peer + headless host |
-| Rupture | Optional. 1.1.6 (ABI V1). Same version everywhere |
+| Rupture | Optional. 1.4.1+ for handoff drag (CorpseHandoffV1); 1.1.6+ for managed drag (CorpseDragV1). Same version everywhere |
 | Downed drag | Fika **server revive enabled**. Not compatible with KeepMeAlive (needs Fika revive off) |
 
 ## Install
@@ -51,7 +51,7 @@ No server mod. `BodyDragFika.dll` is not a plugin; the main plugin loads it only
 |---|---|---|---|
 | General | Enable Body Dragging | true | |
 | General | Drag Speed Multiplier | 0.2 | Applies to corpse and downed drag |
-| General | Armed Drag | PistolOnly | `Off` / `PistolOnly` / `AnyWeapon`. Keeps or draws a one-handed weapon, left arm on the body, no ADS. `Off` = use the next key |
+| General | Armed Drag | PistolOnly | `Off` / `PistolOnly` / `AnyWeapon`. Keeps or draws a one-handed weapon, left arm on the body; pistols can ADS, other weapons can't. `Off` = use the next key |
 | General | Unequip Hands While Dragging | true | Empty hands when not armed; restored after |
 | General | Allow Zombie/Bot Corpses | true | |
 | Physics | Max Hand Speed | 4.5 | m/s |
@@ -61,11 +61,11 @@ No server mod. `BodyDragFika.dll` is not a plugin; the main plugin loads it only
 | Physics | Limb Follow Strength | 0.5 | 0 = joints only. Raise for heavier feel |
 | Physics | Held Distance Multiplier | 0.5 | |
 | Physics | Max Separation Seconds | 5 | |
+| Rupture | Use Handoff Drag | true | Rupture 1.4.0+: Rupture lets go of the corpse while dragged, every peer simulates its own copy, Rupture takes it back at the rest pose. Dragger's setting only. Off = Rupture solver drags (rows below) |
 | Rupture | Remote Target Smoothing | 0.08 | s, remote draggers only |
 | Rupture | Ground Follow Hold | true | Hold height follows terrain |
 | Rupture | Hold Pose Yaw Follow | 0 | Experimental, can twist |
 | Rupture | Head Leads / Head Lead Turn Rate | false / 120 | Experimental, head faces you |
-| Fika | Headless Applies Final Pose Only | true | Standalone path only |
 | Debug | Debug Logging | false | Timing/cadence logs |
 
 Note: BepInEx keeps old values when a default changes. Edit or delete the cfg entry.

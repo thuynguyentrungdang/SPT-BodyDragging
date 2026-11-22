@@ -1,9 +1,6 @@
-using System.Collections.Generic;
-using System.Linq;
 using EFT;
 using EFT.CameraControl;
 using EFT.Interactive;
-using EFT.InventoryLogic;
 using UnityEngine;
 using BodyDragging.Integration;
 
@@ -12,49 +9,35 @@ namespace BodyDragging.Features
     // Ported from TraumaCore's CorpseDragController (Apache-2.0, Hysocs): pulls the corpse's
     // chest rigidbody toward a point in front of the camera via a kinematic hand+joint tether
     // (ported from KeepMeAlive's BodyRagdoll; the original TraumaCore spring force has been
-    // replaced - see CreateHand). Trauma-specific dependencies (Plugin.EnableCorpseDragging,
+    // replaced - see NativeDragBody). Trauma-specific dependencies (Plugin.EnableCorpseDragging,
     // TraumaLog, wound inspection) are replaced with this mod's own config/log, and BodyDragSync
     // hooks let an optional Fika bridge mirror the drag to peers.
     //
+    // This class is the local dragger: camera, target, hands, claim and network. The physics is
+    // NativeDragBody, which every other peer also runs on its own copy of the body
+    // (RemoteCorpseDragSim) from the hold parameters sent here.
+    //
     // Grabbing while the corpse's own death ragdoll is still mid-collapse (joints not yet at an
     // equilibrium pose - confirmed via decompiled source + extensive diagnostic logging) reliably
-    // explodes once dynamic joint physics + this class's break-force/solver overrides engage. A
-    // fully kinematic rigid-carry avoids that but gives up real ragdoll motion entirely, which
-    // isn't what's wanted here. Instead: wait for the corpse's own physics to actually go calm
+    // explodes once dynamic joint physics + the break-force/solver overrides engage. A fully
+    // kinematic rigid-carry avoids that but gives up real ragdoll motion entirely, which isn't
+    // what's wanted here. Instead: wait for the corpse's own physics to actually go calm
     // (BeginSettling/TickSettling, polled by velocity - not EFT's own `_isPhysicsDone` flag, which
     // isn't guaranteed to ever flip under some hosting conditions) before engaging the real,
-    // dynamic joint-driven drag below. Matches why KeepMeAlive's own joint-tether ragdoll (ported
-    // from here originally) never explodes: it only ever ragdolls a living player from a calm
-    // pose, never a body that just absorbed a death impulse mid-collapse.
+    // dynamic joint-driven drag.
     internal sealed partial class CorpseDragController : MonoBehaviour
     {
         private const float HeldDistanceBlendDuration = 0.25f;
-        private const float PoseSendInterval = 1f / 15f;        // Below this, a body counts as settled rather than still actively falling/flailing.
-        private const float SettleVelocityThreshold = 0.3f;
-        private const float SettleAngularVelocityThreshold = 1f;
-        // Calm has to hold for a short stretch, not just one lucky frame mid-flail.
-        private const float RequiredCalmSeconds = 0.3f;
-        // Safety cap so a corpse that never reads as calm (edge case) doesn't block the grab
-        // forever - accept the residual risk after this long rather than brick dragging entirely,
-        // which is what gating on `_isPhysicsDone` directly did.
-        private const float MaxSettleWaitSeconds = 3f;
-
-        private sealed class BodyState
-        {
-            internal Rigidbody Body;
-            internal RigidbodyConstraints Constraints;
-            internal Vector3 InitialWorldPosition;
-            internal CollisionDetectionMode OriginalCollisionMode;
-        }
+        private const float PoseSendInterval = 1f / 15f;
+        // how often the dragger's hold parameters (yaw, distance, camera offset) go to the other peers
+        private const float HoldSendInterval = 0.1f;
 
         private static CorpseDragController _active;
-        private readonly List<BodyState> _bodyStates = new();
-        private readonly RagdollJointStability _jointStability = new();
+        private NativeDragBody _body;
         private GamePlayerOwner _owner;
         private Corpse _corpse;
         private CorpseRagdoll _ragdoll;
         private Camera _camera;
-        private Rigidbody _grabbedBody;
         private float _grabDistance;
         private float _initialGrabDistance;
         private float _targetGrabDistance;
@@ -63,24 +46,20 @@ namespace BodyDragging.Features
         private float _grabHeightAtCapture;
         private float _maximumTargetSeparation;
         private float _separationDuration;
-        private bool _originalPutToSleep;
         private bool _isSettling;
         private float _settleElapsed;
         private float _calmElapsed;
         private bool _isStopping;
         private bool _claimDenied;
-        private CorpseWeaponLink.DetachedWeapon _detachedWeapon;
         private Player _localPlayer;
         private float _nextPoseSendTime;
-        private uint _poseSequence;
-        private Vector3 _grabbedBodyPositionAtCapture;
-        private GameObject _handObject;
-        private Rigidbody _handBody;
-        private ConfigurableJoint _handJoint;
-        private Vector3 _lastHandTarget;
+        private float _nextHoldSendTime;
+        private uint _holdSequence;
 
         private bool _managed, _managedReady;
         private bool _nativeOwnershipStarted;
+        // Rupture handed the corpse over (CorpseHandoffV1): same native drag, but HandoffLeases owns the token
+        private bool _handoff;
         private ManagedDragStart _managedIdentity;
         private uint _managedStatusSequence, _managedInputSequence;
         private float _lastManagedStatus;
@@ -171,6 +150,9 @@ namespace BodyDragging.Features
             if (_ragdoll._rigidbodySpawners == null || _ragdoll._rigidbodySpawners.Length == 0) return false;
 
             CorpseRagdollSettlement.Cancel(corpse);
+            CorpseRestDeclarer.Cancel(corpse);
+            _handoff = route == CorpseRoute.Handoff;
+            _body = new NativeDragBody(corpse, _handoff);
             _nativeOwnershipStarted = true;
             _isSettling = true;
             _settleElapsed = 0f;
@@ -190,77 +172,31 @@ namespace BodyDragging.Features
             }
 
             _settleElapsed += deltaTime;
-            _calmElapsed = IsRagdollCalm() ? _calmElapsed + deltaTime : 0f;
+            _calmElapsed = _body.IsCalm() ? _calmElapsed + deltaTime : 0f;
 
-            if (_calmElapsed < RequiredCalmSeconds && _settleElapsed < MaxSettleWaitSeconds)
+            if (_calmElapsed < NativeDragBody.RequiredCalmSeconds && _settleElapsed < NativeDragBody.MaxSettleWaitSeconds)
                 return;
 
+            NativeDragBody.EngageResult result = EngageDrag();
+            if (result == NativeDragBody.EngageResult.Pending)
+                return;
             _isSettling = false;
-            if (!EngageDrag())
+            if (result == NativeDragBody.EngageResult.Failed)
             {
                 BodyDragLog.Warning("[CorpseDrag] Could not engage drag after settling");
                 StopDragging();
             }
         }
 
-        private bool IsRagdollCalm()
-        {
-            float velocitySq = SettleVelocityThreshold * SettleVelocityThreshold;
-            float angularVelocitySq = SettleAngularVelocityThreshold * SettleAngularVelocityThreshold;
-            foreach (RigidbodySpawner spawner in _ragdoll._rigidbodySpawners)
-            {
-                Rigidbody body = spawner?.Rigidbody;
-                if (body == null || body.isKinematic)
-                    continue;
-                if (body.velocity.sqrMagnitude > velocitySq || body.angularVelocity.sqrMagnitude > angularVelocitySq)
-                    return false;
-            }
-            return true;
-        }
-
         // The real grab: runs only once the corpse has been confirmed calm by TickSettling.
-        private bool EngageDrag()
+        // Pending: handoff mode is still waiting for Rupture to release the corpse
+        private NativeDragBody.EngageResult EngageDrag()
         {
-            Dictionary<RigidbodySpawner, (Vector3 Position, Quaternion Rotation)> poses =
-                _ragdoll._rigidbodySpawners
-                    .Where(spawner => spawner != null)
-                    .ToDictionary(spawner => spawner, spawner => (spawner.transform.position, spawner.transform.rotation));
-            _detachedWeapon = CorpseWeaponLink.Detach(_ragdoll);
-            ActivateRagdoll();
-            _jointStability.Capture(_ragdoll._jointSpawners);
-            foreach (KeyValuePair<RigidbodySpawner, (Vector3 Position, Quaternion Rotation)> pose in poses)
-            {
-                Rigidbody body = pose.Key.Rigidbody;
-                if (body == null)
-                    continue;
-                pose.Key.transform.SetPositionAndRotation(pose.Value.Position, pose.Value.Rotation);
-                body.position = pose.Value.Position;
-                body.rotation = pose.Value.Rotation;
-                body.velocity = Vector3.zero;
-                body.angularVelocity = Vector3.zero;
-                _bodyStates.Add(new BodyState
-                {
-                    Body = body,
-                    Constraints = body.constraints,
-                    OriginalCollisionMode = body.collisionDetectionMode
-                });
-                body.constraints = RigidbodyConstraints.None;
-                body.isKinematic = false;
-                // a limb whipped around by a fast drag is small/fast enough to tunnel through thin
-                // floors/stairs at the default discrete detection mode
-                body.collisionDetectionMode = CollisionDetectionMode.Continuous;
-                body.WakeUp();
-                EnsurePhysicsStepped(body);
-            }
-            Physics.SyncTransforms();
-            if (!FindChestBody(out _grabbedBody, out Vector3 worldPoint))
-                return false;
+            NativeDragBody.EngageResult result = _body.TryEngage();
+            if (result != NativeDragBody.EngageResult.Engaged)
+                return result;
 
-            _grabbedBodyPositionAtCapture = _grabbedBody.position;
-            foreach (BodyState state in _bodyStates)
-                if (state.Body != null)
-                    state.InitialWorldPosition = state.Body.position;
-
+            Vector3 worldPoint = _body.ChestCenter;
             float interactionRange = EFTHardSettings.Instance.LOOT_RAYCAST_DISTANCE + EFTHardSettings.Instance.BEHIND_CAST;
             Vector3 cameraToGrab = worldPoint - _camera.transform.position;
             _initialGrabDistance = Vector3.ProjectOnPlane(cameraToGrab, Vector3.up).magnitude;
@@ -270,26 +206,11 @@ namespace BodyDragging.Features
             _maximumTargetSeparation = interactionRange;
             _cameraHeightAtCapture = _camera.transform.position.y;
             _grabHeightAtCapture = worldPoint.y;
-            CreateHand(worldPoint);
-            LogDiagState("capture");
             DragHands.Begin(_localPlayer, this, _corpse.PlayerProfileID);
             BodyDragLog.Info(
-                $"[CorpseDrag] Grabbed '{_grabbedBody.name}' at {_initialGrabDistance:F2}m, blending to " +
+                $"[CorpseDrag] Grabbed '{_body.GrabbedBody.name}' at {_initialGrabDistance:F2}m, blending to " +
                 $"{_targetGrabDistance:F2}m inside EFT interaction range {interactionRange:F2}m");
-            return true;
-        }
-
-        // EFT runs Physics.Simulate itself, and only while at least one rigidbody is registered
-        // with its UpdateController. A freshly killed corpse's bodies can be unregistered (seen in
-        // logs: 0 supported, simulation off) - dynamic but never stepped, so the drag does nothing.
-        // CorpseRagdoll.Start() registers them, which is why a second grab used to work.
-        // SupportRigidbody doesn't dedupe; UnsupportRigidbody removes one entry, so add once.
-        private static void EnsurePhysicsStepped(Rigidbody body)
-        {
-            foreach (PhysicsExtensions.UpdateController.RigidbodyData data in PhysicsExtensions.UpdateController._rigidbodies)
-                if (data.rigidbody == body)
-                    return;
-            PhysicsExtensions.UpdateController.SupportRigidbody(body, 0f);
+            return NativeDragBody.EngageResult.Engaged;
         }
 
         internal static bool IsDraggedCollider(Collider collider)
@@ -304,140 +225,29 @@ namespace BodyDragging.Features
             return false;
         }
 
-        private void ActivateRagdoll()
-        {
-            _originalPutToSleep = _ragdoll._putToSleep;
-            bool hasMissingBody = _ragdoll._rigidbodySpawners.Any(spawner => spawner == null || spawner.Rigidbody == null);
-            bool wasPhysicsDone = _ragdoll._isPhysicsDone;
-            if (!_ragdoll._isPhysicsDone && !hasMissingBody)
-            {
-                _ragdoll.WakeUp();
-                CorpseRagdollSettlement.TakeOver(_ragdoll);
-                DragDiagnostics.LogActivation(_ragdoll, wasPhysicsDone, hasMissingBody, _originalPutToSleep, "WakeUp");
-                return;
-            }
-
-            _ragdoll._putToSleep = false;
-            try
-            {
-                _ragdoll.Start();
-            }
-            finally
-            {
-                _ragdoll._putToSleep = _originalPutToSleep;
-            }
-            CorpseRagdollSettlement.TakeOver(_ragdoll);
-            DragDiagnostics.LogActivation(_ragdoll, wasPhysicsDone, hasMissingBody, _originalPutToSleep, "Start");
-        }
-
-        // Every ragdoll RigidbodySpawner carries a BodyPartCollider (EFT's own
-        // PlayerPoolObject.CreatePlayerRigidbodySleepHierarchy relies on it); RibcageUp is the
-        // upper-chest body EFT itself treats as the ragdoll's upper root.
-        private bool FindChestBody(out Rigidbody grabbedBody, out Vector3 worldPoint)
-        {
-            foreach (RigidbodySpawner spawner in _ragdoll._rigidbodySpawners)
-            {
-                if (spawner == null || spawner.Rigidbody == null)
-                    continue;
-                if (!spawner.TryGetComponent(out BodyPartCollider part) ||
-                    part.BodyPartColliderType != EBodyPartColliderType.RibcageUp)
-                    continue;
-                grabbedBody = spawner.Rigidbody;
-                worldPoint = grabbedBody.worldCenterOfMass;
-                return true;
-            }
-
-            grabbedBody = null;
-            worldPoint = default;
-            return false;
-        }
-
-        // Ported technique from KeepMeAlive's BodyRagdoll: pull the grabbed body with a kinematic
-        // "hand" joined to it by a ConfigurableJoint instead of an explicit spring force. PhysX
-        // solves the joint's small linear limit as a near-hard constraint every substep, so there
-        // is no spring overshoot/oscillation to tune - the hand just moves at a capped speed and
-        // the joint keeps the chest within its slack.
-        private void CreateHand(Vector3 worldPoint)
-        {
-            _handObject = new GameObject("BodyDrag Hand");
-            _handObject.transform.position = worldPoint;
-
-            _handBody = _handObject.AddComponent<Rigidbody>();
-            _handBody.isKinematic = true;
-            _handBody.useGravity = false;
-
-            _handJoint = _handObject.AddComponent<ConfigurableJoint>();
-            _handJoint.autoConfigureConnectedAnchor = false;
-            _handJoint.anchor = Vector3.zero;
-            // hand sits on the chest's center of mass (the grab point), so tether that, not the
-            // bone pivot - otherwise the joint starts already stretched and yanks on first tick
-            _handJoint.connectedAnchor = _grabbedBody.centerOfMass;
-            _handJoint.connectedBody = _grabbedBody;
-            _handJoint.xMotion = ConfigurableJointMotion.Limited;
-            _handJoint.yMotion = ConfigurableJointMotion.Limited;
-            _handJoint.zMotion = ConfigurableJointMotion.Limited;
-            _handJoint.linearLimit = new SoftJointLimit { limit = Plugin.HoldSlack.Value };
-            _handJoint.angularXMotion = ConfigurableJointMotion.Free;
-            _handJoint.angularYMotion = ConfigurableJointMotion.Free;
-            _handJoint.angularZMotion = ConfigurableJointMotion.Free;
-            _handJoint.projectionMode = JointProjectionMode.PositionAndRotation;
-            _handJoint.projectionDistance = 0.1f;
-            _handJoint.enablePreprocessing = false;
-
-            _lastHandTarget = worldPoint;
-        }
-
-        private void DestroyHand()
-        {
-            if (_handObject != null)
-            {
-                // Deactivated first: Destroy only takes effect at the end of the frame, and the
-                // joint would keep pulling the chest through any physics step before then.
-                _handObject.SetActive(false);
-                Destroy(_handObject);
-            }
-            _handObject = null;
-            _handBody = null;
-            _handJoint = null;
-        }
-
-        // Moves every dragged body (and the hand) by the same offset and stops it, keeping the
-        // ragdoll's shape - used when the hold point jumps too far in one tick (teleport) or when
-        // the chest has ended up stuck far from where it should be (wedged on geometry).
-        private void ShiftDragBodies(Vector3 offset)
-        {
-            foreach (BodyState state in _bodyStates)
-            {
-                if (state.Body == null)
-                    continue;
-                state.Body.position += offset;
-                state.Body.velocity = Vector3.zero;
-                state.Body.angularVelocity = Vector3.zero;
-            }
-            if (_handBody != null)
-                _handBody.position += offset;
-        }
-
-        // Driven from Update, not FixedUpdate: EFT runs Physics.Simulate once per frame from its own
-        // Update (Script simulation mode), so Unity's fixed step would give 0 or N hand moves/limb
-        // forces per actual physics step, and repeat corrections against not-yet-synced transforms
         private void TickDrag(float deltaTime)
         {
-            if (_grabbedBody == null || _camera == null || _corpse == null)
+            if (_body == null || !_body.IsEngaged || _camera == null || _corpse == null)
             {
+                StopDragging();
+                return;
+            }
+            if (_handoff && !HandoffLeases.Holds(_corpse))
+            {
+                // Rupture took the corpse back (lease expired, raid reset): nothing left to drag
+                BodyDragLog.Warning("[CorpseDrag] Handoff lease lost, releasing corpse");
                 StopDragging();
                 return;
             }
 
             Transform cameraTransform = _camera.transform;
             Vector3 cameraPosition = cameraTransform.position;
-            // rigidbody-derived, not transform: transforms only sync after EFT's simulate (auto
-            // sync off), so they lag position writes like ShiftDragBodies
-            Vector3 worldPoint = _grabbedBody.worldCenterOfMass;
+            float yaw = cameraTransform.eulerAngles.y;
+            Vector3 worldPoint = _body.ChestCenter;
             _grabDistanceBlendElapsed += deltaTime;
             float distanceBlend = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(_grabDistanceBlendElapsed / HeldDistanceBlendDuration));
             _grabDistance = Mathf.Lerp(_initialGrabDistance, _targetGrabDistance, distanceBlend);
-            Vector3 horizontalForward = Quaternion.Euler(0f, cameraTransform.eulerAngles.y, 0f) * Vector3.forward;
+            Vector3 horizontalForward = Quaternion.Euler(0f, yaw, 0f) * Vector3.forward;
             Vector3 target = cameraPosition + horizontalForward * _grabDistance;
             target.y = _grabHeightAtCapture + (cameraPosition.y - _cameraHeightAtCapture);
             if ((worldPoint - cameraPosition).sqrMagnitude > _maximumTargetSeparation * _maximumTargetSeparation)
@@ -455,104 +265,29 @@ namespace BodyDragging.Features
                 _separationDuration = 0f;
             }
 
-            // A hold jumping further than this in one tick is a teleport (camera/player snap,
-            // vault, etc.), not a pull - move the whole ragdoll with it instead of letting the
-            // joint fling it across the gap. Failing that, if the chest still ends up far from
-            // the hold (stuck on geometry despite the snag-fix in RepairExcessiveSeparation),
-            // relocate it there directly rather than leaving the drag permanently jammed.
-            Vector3 jump = target - _lastHandTarget;
-            float teleportDistance = Plugin.TeleportDistance.Value;
-            if (jump.sqrMagnitude > teleportDistance * teleportDistance)
-            {
-                ShiftDragBodies(jump);
-                worldPoint = _grabbedBody.worldCenterOfMass;
-            }
-            float maxHoldError = Plugin.MaxHoldError.Value;
-            if ((worldPoint - target).sqrMagnitude > maxHoldError * maxHoldError)
-                ShiftDragBodies(target - worldPoint);
-            _lastHandTarget = target;
-
-            // joint-connected bodies share the grabbed body's physics island, so PhysX wakes them
-            // together - only the grabbed body itself needs checking, not the whole ragdoll
-            if (_grabbedBody.IsSleeping())
-                _grabbedBody.WakeUp();
-            _handBody.MovePosition(Vector3.MoveTowards(_handBody.position, target, Plugin.MaxHandSpeed.Value * deltaTime));
-            DriveLimbs();
-            _jointStability.RepairExcessiveSeparation(deltaTime);
-
-            _diagElapsed += deltaTime;
-            if (DragDiagnostics.ShouldProbe(_diagElapsed, ref _diagNextProbe))
-                LogDiagState($"tick t={_diagElapsed:F1}");
-
-            SendPoseIfDue();
+            _body.Tick(target, deltaTime);
+            SendHoldIfDue(cameraPosition, yaw, target);
         }
 
-        // TEMP diagnostics - remove with DragDiagnostics
-        private float _diagElapsed;
-        private float _diagNextProbe;
-
-        private void LogDiagState(string label)
+        // The other peers simulate their own copy of the body; this is all they need of the hold
+        // (they already have this player's position from normal Fika movement sync).
+        private void SendHoldIfDue(Vector3 cameraPosition, float yaw, Vector3 target)
         {
-            List<Rigidbody> bodies = new(_bodyStates.Count);
-            foreach (BodyState state in _bodyStates)
-                bodies.Add(state.Body);
-            DragDiagnostics.LogState(label, _ragdoll, bodies, _grabbedBody, _grabbedBodyPositionAtCapture, _handBody, _jointStability);
-        }
-
-        // every other ragdoll body otherwise only moves by being dragged through CharacterJoint
-        // constraints from the grabbed body - give each one its own scaled-down spring toward a
-        // translation-only carried-along target so limbs keep pace with the torso instead of
-        // lagging through finite joint-solver iterations. Translation-only (not a rotated rigid
-        // offset) so a turning torso doesn't whip distant limbs through a rotated target - joints
-        // still own rotation/swing entirely
-        private void DriveLimbs()
-        {
-            Vector3 grabbedBodyDelta = _grabbedBody.position - _grabbedBodyPositionAtCapture;
-            float limbSpring = Plugin.GrabSpring.Value * Plugin.LimbFollowStrength.Value;
-            float limbDamping = 2.2f * Mathf.Sqrt(Mathf.Max(limbSpring, 0.01f));
-
-            foreach (BodyState state in _bodyStates)
-            {
-                if (state.Body == null || state.Body == _grabbedBody)
-                    continue;
-
-                Vector3 limbTarget = state.InitialWorldPosition + grabbedBodyDelta;
-                Vector3 toTarget = limbTarget - state.Body.position;
-                Vector3 limbAccel = toTarget * limbSpring - state.Body.velocity * limbDamping;
-                limbAccel = Vector3.ClampMagnitude(limbAccel, Plugin.MaximumGrabAcceleration.Value);
-                if (state.Body.IsSleeping())
-                    state.Body.WakeUp();
-                state.Body.AddForce(limbAccel, ForceMode.Acceleration);
-            }
-        }
-
-        private void SendPoseIfDue()
-        {
-            if (!BodyDragSync.Active || Time.unscaledTime < _nextPoseSendTime)
+            if (!BodyDragSync.Active || Time.unscaledTime < _nextHoldSendTime)
                 return;
-            _nextPoseSendTime = Time.unscaledTime + PoseSendInterval;
-            BodyDragSync.PoseSent?.Invoke(BuildPose());
-        }
-
-        private BodyDragPose BuildPose()
-        {
-            int boneCount = _bodyStates.Count;
-            Vector3[] positions = new Vector3[boneCount];
-            Quaternion[] rotations = new Quaternion[boneCount];
-            for (int i = 0; i < boneCount; i++)
-            {
-                Rigidbody body = _bodyStates[i].Body;
-                positions[i] = body != null ? body.position : Vector3.zero;
-                rotations[i] = body != null ? body.rotation : Quaternion.identity;
-            }
-            return new BodyDragPose
+            _nextHoldSendTime = Time.unscaledTime + HoldSendInterval;
+            Vector3 root = _localPlayer.Position;
+            RemoteHoldMath.ToLocal(cameraPosition - root, yaw, out float localX, out float localZ);
+            BodyDragSync.HoldSent?.Invoke(new BodyDragHold
             {
                 ProfileId = _corpse.PlayerProfileID,
-                Sequence = _poseSequence++,
-                Pelvis = _grabbedBody != null ? _grabbedBody.position : Vector3.zero,
-                BonePositions = positions,
-                BoneRotations = rotations
-            };
+                Sequence = ++_holdSequence,
+                Yaw = yaw,
+                Distance = _grabDistance,
+                LocalX = localX,
+                LocalZ = localZ,
+                HeightOffset = target.y - root.y
+            });
         }
 
         private void Update()
@@ -601,32 +336,26 @@ namespace BodyDragging.Features
                 if (_active == this) _active = null;
                 return;
             }
-            if (_ragdoll != null && _grabbedBody != null)
-                LogDiagState("release");
-            DestroyHand();
-            _jointStability.RepairExcessiveSeparation(Time.deltaTime);
-            _jointStability.Restore();
-            foreach (BodyState state in _bodyStates)
-                if (state.Body != null)
-                {
-                    state.Body.constraints = state.Constraints;
-                    state.Body.collisionDetectionMode = state.OriginalCollisionMode;
-                    state.Body.velocity = Vector3.ClampMagnitude(state.Body.velocity, 2f);
-                    state.Body.angularVelocity = Vector3.ClampMagnitude(state.Body.angularVelocity, 4f);
-                }
+            bool engaged = _body != null && _body.IsEngaged;
+            if (_body != null)
+                _body.Release();
             if (_localPlayer != null)
                 _localPlayer.UpdateSpeedLimitByHealth();
             DragHands.End(this);
-            _detachedWeapon?.RestoreCollisions();
-            if (_corpse != null)
+            // handoff: this peer settles the body and declares where it lies (a denied claim waits for the winner's
+            // pose instead), then HandoffLeases gives the corpse back to Rupture with one Adopt
+            if (_handoff && _corpse != null)
+                HandoffLeases.BeginDrop(_corpse, !_claimDenied, HandoffLeases.GraphicalRestWaitSeconds);
+            if (_corpse != null && BodyDragSync.Active && !_claimDenied)
             {
-                CorpseRagdollSettlement.Schedule(_corpse, _ragdoll);
-                if (BodyDragSync.Active && !_claimDenied && _grabbedBody != null)
-                    BodyDragSync.DragStoppedLocally?.Invoke(_corpse.PlayerProfileID, BuildPose());
+                BodyDragSync.DragStoppedLocally?.Invoke(_corpse.PlayerProfileID);
+                // every peer settles its own copy; once this one has, the final pose goes out so they all match it
+                if (engaged && !_handoff)
+                    CorpseRestDeclarer.Begin(_corpse);
             }
             if (_active == this)
                 _active = null;
-            BodyDragLog.Info("[CorpseDrag] Released corpse to EFT settling cycle");
+            BodyDragLog.Info(_handoff ? "[CorpseDrag] Released corpse, settling before handing it back to Rupture" : "[CorpseDrag] Released corpse to EFT settling cycle");
         }
     }
 }

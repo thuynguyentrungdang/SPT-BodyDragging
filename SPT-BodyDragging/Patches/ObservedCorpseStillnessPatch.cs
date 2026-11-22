@@ -34,7 +34,7 @@ namespace BodyDragging.Patches
         [PatchPostfix]
         private static void Postfix(ObservedCorpse __instance, ref bool __result)
         {
-            if (CorpseDragController.IsNativeDragging(__instance))
+            if (CorpseDragController.IsNativeDragging(__instance) || RemoteCorpseDragSim.IsSimulating(__instance))
                 __result = false;
         }
     }

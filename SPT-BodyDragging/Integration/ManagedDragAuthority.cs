@@ -52,7 +52,7 @@ namespace BodyDragging.Integration
                 !Singleton<GameWorld>.Instantiated) return false;
             Corpse corpse = FindCorpse(start.ProfileId);
             if (corpse?.Ragdoll == null || (!Plugin.AllowZombieOrBotCorpses.Value && corpse.IsZombieCorpse) ||
-                RuptureDragProvider.Inspect(corpse, out ProviderInfo info) != CorpseRoute.Managed || !info.IsAuthority || info.DeathSequence != start.DeathSequence)
+                RuptureDragProvider.Inspect(corpse, out ProviderInfo info, false) != CorpseRoute.Managed || !info.IsAuthority || info.DeathSequence != start.DeathSequence)
                 return false;
             ManagedDragSettings settings = ManagedDragSettings.Capture();
             if (!settings.Valid) return false;
@@ -327,7 +327,10 @@ namespace BodyDragging.Integration
         internal static bool CanUseNative(string profileId)
         {
             Corpse corpse = FindCorpse(profileId);
-            return corpse?.Ragdoll != null && RuptureDragProvider.Inspect(corpse, out _) == CorpseRoute.Native;
+            if (corpse?.Ragdoll == null) return false;
+            // a plain native corpse, or one Rupture hands over: both run the native drag on every peer
+            CorpseRoute route = RuptureDragProvider.Inspect(corpse, out _, true);
+            return route == CorpseRoute.Native || route == CorpseRoute.Handoff;
         }
         internal static Corpse FindCorpse(string profileId)
         {

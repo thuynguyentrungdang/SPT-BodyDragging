@@ -25,10 +25,140 @@ internal static class Program
     private static object Call(Type type, string name, params object[] args) => type.GetMethod(name, All).Invoke(null, args);
     private static void Main(string[] args)
     {
-        TestIntentAndLifetime(); TestAbiAdapter(); TestDrive(); TestWire(); TestClaimsAndQueue(); TestArchitecture(); TestDowned();
+        TestIntentAndLifetime(); TestAbiAdapter(); TestHandoff(); TestDrive(); TestWire(); TestClaimsAndQueue(); TestArchitecture(); TestDowned(); TestNativeLimbAssist();
         if (args.Length == 2) NativeDriveTests.Run(args[0],args[1],Check);
         Console.WriteLine($"ALL PASS: {_checks} checks; live EFT/Fika tests are not represented by these fixtures.");
     }
+    // limb mass point chasing a target moving at 1.5 m/s, force applied once per step like EFT's single Physics.Simulate
+    private static void TestNativeLimbAssist()
+    {
+        foreach (float dt in new[] { 1f / 240f, 1f / 144f, 1f / 60f, 1f / 30f, .1f })
+        {
+            Vector3 position = Vector3.zero, velocity = Vector3.zero;
+            float maxSpeed = 0, error = 0;
+            for (int step = 1; step <= (int)(3 / dt); step++)
+            {
+                Vector3 target = new(1.5f * dt * step, 0, 0);
+                Vector3 acceleration = BodyDragging.Features.LimbAssistMath.Acceleration(target - position, velocity, 4000f, dt, 8000f);
+                velocity += acceleration * dt; position += velocity * dt;
+                maxSpeed = Math.Max(maxSpeed, velocity.magnitude); error = (target - position).magnitude;
+            }
+            Check(maxSpeed < 4f && error < .2f, $"native limb assist is stable at dt={dt:F4}: maxSpeed={maxSpeed:F2} error={error:F3}");
+        }
+        Check(BodyDragging.Features.LimbAssistMath.Acceleration(new Vector3(100, 0, 0), Vector3.zero, 4000f, 1f / 60f, 8000f).magnitude <= 8000.01f, "native limb assist honours the acceleration cap");
+    }
+    // Rupture CorpseHandoffV1 route: adapter decoding, route mapping and the per-corpse token life cycle, driven through
+    // the lease seams with a fixture facade built on Rupture's real DTOs (no engine, no Rupture runtime).
+    private static int _fakeIds = 900000;
+    private static Corpse FakeCorpse()
+    {
+        Corpse corpse = (Corpse)RuntimeHelpers.GetUninitializedObject(typeof(Corpse));
+        typeof(UnityEngine.Object).GetField("m_CachedPtr",All).SetValue(corpse,(IntPtr)(++_fakeIds));
+        return corpse;
+    }
+    private static void TestHandoff()
+    {
+        FixtureHandoff.Reset();
+        Check(!RuptureHandoffProvider.Available && RuptureHandoffProvider.Inspect(null,out _) == HandoffCode.Failed, "handoff unavailable until bound");
+        Call(typeof(RuptureHandoffProvider),"Bind",typeof(CorpseHandoffV1).Assembly,typeof(FixtureHandoff));
+        Check(RuptureHandoffProvider.Available, "handoff ABI V1 binds against Rupture's real DTOs");
+        Corpse a = FakeCorpse(), b = FakeCorpse();
+        Check(a != null && b != null && a != b, "fake corpses are distinct live Unity objects");
+
+        FixtureHandoff.State = Rupture.Integration.HandoffState.Managed; FixtureHandoff.Simulating = true;
+        Check(RuptureHandoffProvider.Inspect(a,out HandoffInfo info) == HandoffCode.Ok && info.State == BodyDragging.Integration.HandoffState.Managed && info.Simulating &&
+            info.WeaponIndependent && info.DeathSequence == 5 && info.OwnershipEpoch == 2, "adapter decodes handoff info");
+        Check(HandoffLeases.IsSimulating(a), "Managed + Simulating gates the pickup");
+        FixtureHandoff.Simulating = false; Check(!HandoffLeases.IsSimulating(a), "calm managed corpse can be picked up");
+
+        // route mapping (explicit true: ignores the local toggle)
+        CorpseRoute Route(Corpse c) => RuptureDragProvider.Inspect(c,out _,true);
+        FixtureHandoff.State = Rupture.Integration.HandoffState.Managed; Check(Route(a) == CorpseRoute.Handoff, "managed corpse routes to handoff");
+        FixtureHandoff.State = Rupture.Integration.HandoffState.Unmanaged; Check(Route(a) == CorpseRoute.Native, "unmanaged corpse routes native");
+        FixtureHandoff.State = Rupture.Integration.HandoffState.Preparing; Check(Route(a) == CorpseRoute.Blocked, "preparing rig blocks the pickup");
+        FixtureHandoff.State = Rupture.Integration.HandoffState.Released; Check(Route(a) == CorpseRoute.Blocked, "released to someone else blocks the pickup");
+        FixtureHandoff.State = Rupture.Integration.HandoffState.Unavailable; Check(Route(a) == CorpseRoute.Blocked, "unavailable blocks the pickup");
+        FixtureHandoff.InspectResult = HandoffResult.NotManaged; Check(Route(a) == CorpseRoute.Native, "NotManaged routes native");
+        FixtureHandoff.InspectResult = HandoffResult.Ok;
+
+        // lease life cycle (a multiplayer session is active, so the declarer sends its rest pose)
+        BodyDragSync.Active = true;
+        float now = 100; HandoffLeases.Reset();
+        HandoffLeases.Clock = () => now;
+        bool settled = false; int declared = 0, finished = 0, setDown = 0; bool lastSend = false;
+        HandoffLeases.Settled = _ => settled;
+        HandoffLeases.DeclareRest = (_,send,handoff) => { declared++; lastSend = send; Check(handoff,"declare runs in handoff mode"); };
+        HandoffLeases.FinishPhysics = _ => finished++;
+        HandoffLeases.SetDown = (_,_,_) => setDown++;
+        void Advance(float seconds, int steps = 1) { for (int i = 0; i < steps; i++) { now += seconds; HandoffLeases.Tick(); } }
+
+        FixtureHandoff.State = Rupture.Integration.HandoffState.Managed; FixtureHandoff.ReleaseResult = HandoffResult.Pending;
+        Check(HandoffLeases.Acquire(a,out _) == LeaseAcquire.Pending && FixtureHandoff.Releases == 1 && FixtureHandoff.LastTimeout == 30f, "release requests a 30 s lease");
+        Check(HandoffLeases.Holds(a) && Route(a) == CorpseRoute.Handoff, "pending lease counts as held");
+        Check(HandoffLeases.Acquire(a,out _) == LeaseAcquire.Pending && FixtureHandoff.Releases == 1, "repeated acquire is idempotent");
+        FixtureHandoff.State = Rupture.Integration.HandoffState.Released; Advance(.1f);
+        Check(HandoffLeases.Acquire(a,out HandoffInfo ready) == LeaseAcquire.Ready && ready != null, "released corpse is ready");
+        Advance(1.1f, 3); Check(FixtureHandoff.Renews == 3, "lease renews about once a second while held");
+
+        // declarer drop: settle, declare + send, finish physics, one adopt
+        HandoffLeases.BeginDrop(a,true,8f); Advance(.1f);
+        Check(declared == 0 && FixtureHandoff.Adopts == 0, "declarer waits for the minimum settle time");
+        settled = true; Advance(.5f);
+        Check(declared == 1 && lastSend && finished == 1 && FixtureHandoff.Adopts == 1 && !HandoffLeases.HasLeases, "declarer sends the rest pose then adopts once");
+
+        // adopt pending is polled until Ok
+        HandoffLeases.Reset(); FixtureHandoff.Reset(); FixtureHandoff.State = Rupture.Integration.HandoffState.Managed; FixtureHandoff.AdoptResult = HandoffResult.Pending;
+        HandoffLeases.Acquire(a,out _); FixtureHandoff.State = Rupture.Integration.HandoffState.Released; Advance(.1f);
+        HandoffLeases.BeginDrop(a,true,8f); settled = true; declared = 0; Advance(.5f);
+        Check(HandoffLeases.HasLeases && !HandoffLeases.Holds(a) && FixtureHandoff.Adopts == 1, "pending adopt keeps the token but no longer holds the corpse");
+        Check(HandoffLeases.Acquire(a,out _) == LeaseAcquire.Pending, "no re-grab while the adopt is closing");
+        FixtureHandoff.AdoptResult = HandoffResult.Ok; Advance(.3f);
+        Check(!HandoffLeases.HasLeases && FixtureHandoff.Adopts == 2, "adopt poll finishes the lease");
+
+        // observer drop: rest pose applies and adopts; otherwise falls back to own pose
+        HandoffLeases.Reset(); FixtureHandoff.Reset(); FixtureHandoff.State = Rupture.Integration.HandoffState.Managed; setDown = 0; declared = 0; finished = 0;
+        HandoffLeases.Acquire(b,out _); FixtureHandoff.State = Rupture.Integration.HandoffState.Released; Advance(.1f);
+        HandoffLeases.BeginDrop(b,false,8f);
+        Check(HandoffLeases.ApplyRest(b,Vector3.zero,new JsonType.TransformSync[0]) && setDown == 1 && FixtureHandoff.Adopts == 1 && finished == 1 && !HandoffLeases.HasLeases, "observer applies the dropper's rest pose then adopts");
+        Check(!HandoffLeases.ApplyRest(b,Vector3.zero,new JsonType.TransformSync[0]), "rest pose for a corpse not held is refused");
+        FixtureHandoff.Reset(); FixtureHandoff.State = Rupture.Integration.HandoffState.Managed; settled = true;
+        HandoffLeases.Acquire(b,out _); FixtureHandoff.State = Rupture.Integration.HandoffState.Released; Advance(.1f);
+        HandoffLeases.BeginDrop(b,false,8f); Advance(1f,6);
+        Check(HandoffLeases.HasLeases && declared == 0, "observer keeps waiting for the rest pose inside the window");
+        Advance(1f,4);
+        Check(!HandoffLeases.HasLeases && declared == 1 && !lastSend && FixtureHandoff.Adopts == 1, "observer adopts at its own pose when no rest pose arrives");
+
+        // re-grab inside the drop window keeps the token and cancels the drop
+        HandoffLeases.Reset(); FixtureHandoff.Reset(); FixtureHandoff.State = Rupture.Integration.HandoffState.Managed; declared = 0;
+        HandoffLeases.Acquire(a,out _); FixtureHandoff.State = Rupture.Integration.HandoffState.Released; Advance(.1f);
+        HandoffLeases.BeginDrop(a,true,8f);
+        Check(HandoffLeases.Acquire(a,out _) == LeaseAcquire.Ready && FixtureHandoff.Releases == 1, "re-grab reuses the held lease");
+        settled = true; Advance(.9f,5); Check(declared == 0 && HandoffLeases.Holds(a), "re-grab cancels the pending drop");
+
+        // lost lease, release timeout, refusal
+        FixtureHandoff.RenewResult = HandoffResult.Stale; Advance(1.1f);
+        Check(!HandoffLeases.HasLeases && FixtureHandoff.Adopts == 0, "lost lease is dropped without a second adopt");
+        FixtureHandoff.Reset(); HandoffLeases.Reset(); FixtureHandoff.State = Rupture.Integration.HandoffState.Managed;
+        HandoffLeases.Acquire(a,out _); Advance(1f,8);
+        Check(!HandoffLeases.HasLeases && FixtureHandoff.Adopts == 1, "release that never completes closes its token");
+        FixtureHandoff.Reset(); FixtureHandoff.State = Rupture.Integration.HandoffState.Managed; FixtureHandoff.ReleaseResult = HandoffResult.Busy;
+        Check(HandoffLeases.Acquire(a,out _) == LeaseAcquire.Refused && !HandoffLeases.HasLeases, "busy release is refused");
+        FixtureHandoff.Reset(); FixtureHandoff.State = Rupture.Integration.HandoffState.Preparing;
+        Check(HandoffLeases.Acquire(a,out _) == LeaseAcquire.Refused && FixtureHandoff.Releases == 0, "preparing corpse is not released");
+
+        // raid end / shutdown
+        FixtureHandoff.Reset(); FixtureHandoff.State = Rupture.Integration.HandoffState.Managed; finished = 0;
+        HandoffLeases.Acquire(a,out _); HandoffLeases.Acquire(b,out _);
+        HandoffLeases.AdoptAll();
+        Check(!HandoffLeases.HasLeases && FixtureHandoff.Adopts == 2 && finished == 2, "AdoptAll returns every held corpse");
+
+        // a throwing facade disables the route instead of the game
+        FixtureHandoff.Reset(); FixtureHandoff.Throw = true;
+        Check(RuptureHandoffProvider.Inspect(a,out _) == HandoffCode.Failed && !RuptureHandoffProvider.Available, "a failing ABI call disables handoff");
+        Check(RuptureDragProvider.Inspect(a,out _,true) != CorpseRoute.Handoff, "disabled handoff never routes to handoff");
+        HandoffLeases.Reset(); BodyDragSync.Active = false;
+    }
+    private static bool Near(Vector3 a, Vector3 b) => (a - b).magnitude < 1e-4f;
     private static void TestDowned()
     {
         Vector3 dragger = new(0,0,0);
@@ -45,6 +175,25 @@ internal static class Program
             "observer hold is min(0.5m, distance) from the root toward the dragger");
         var packet = Roundtrip(new DownedDragPacket { Op=DownedDragPacket.Start, Downed="downed", Dragger="dragger" });
         Check(packet.Op == DownedDragPacket.Start && packet.Downed == "downed" && packet.Dragger == "dragger", "downed-drag claim roundtrip");
+        var started = Roundtrip(new DragStartPacket { ProfileId="corpse", Dragger="dragger" });
+        Check(started.ProfileId == "corpse" && started.Dragger == "dragger", "native drag start names the dragger");
+        var holdPacket = Roundtrip(new DragHoldPacket { ProfileId="corpse", Sequence=7, Yaw=90, Distance=.6f, LocalX=.1f, LocalZ=-.2f, HeightOffset=.9f });
+        var hold = holdPacket.ToHold();
+        Check(hold.ProfileId == "corpse" && hold.Sequence == 7 && hold.Yaw == 90 && hold.Distance == .6f && hold.LocalX == .1f && hold.LocalZ == -.2f && hold.HeightOffset == .9f,
+            "native drag hold roundtrip");
+        var restPacket = Roundtrip(new DragRestPacket { ProfileId="corpse", Root=new Vector3(1,2,3), BonePositions=new[] { Vector3.one, Vector3.zero }, BoneRotations=new[] { Quaternion.identity, Quaternion.identity } });
+        var rest = restPacket.ToRest();
+        Check(rest.ProfileId == "corpse" && rest.Root == new Vector3(1,2,3) && rest.BonePositions.Length == 2 && rest.BoneRotations.Length == 2 && rest.BonePositions[0] == Vector3.one,
+            "native drag rest roundtrip");
+        NetDataWriter badRest = new(); badRest.Put("corpse"); badRest.PutUnmanaged(Vector3.zero); badRest.Put(100000);
+        DragRestPacket rejectedRest = default; rejectedRest.Deserialize(new NetDataReader(badRest.CopyData()));
+        Check(rejectedRest.BonePositions.Length == 0, "native drag rest with an absurd bone count reads as no pose");
+        Vector3 holdTarget = BodyDragging.Features.RemoteHoldMath.Target(new Vector3(1, 0, 2), 0f, .1f, .2f, .5f, .3f);
+        Check(Near(holdTarget, new Vector3(1.1f, .3f, 2.7f)), "hold target at yaw 0 is forward along +z");
+        Check(Near(BodyDragging.Features.RemoteHoldMath.Target(Vector3.zero, 90f, 0f, 0f, 1f, 0f), new Vector3(1f, 0f, 0f)) &&
+            Near(BodyDragging.Features.RemoteHoldMath.Target(Vector3.zero, 90f, 1f, 0f, 0f, 0f), new Vector3(0f, 0f, -1f)), "hold target follows the dragger's yaw (forward and right)");
+        BodyDragging.Features.RemoteHoldMath.ToLocal(new Vector3(.3f, 0, -.7f), 40f, out float lx, out float lz);
+        Check(Near(BodyDragging.Features.RemoteHoldMath.Target(Vector3.zero, 40f, lx, lz, 0f, 0f), new Vector3(.3f, 0, -.7f)), "camera offset round-trips through the yaw frame");
         var hand = Roundtrip(new DragHandPacket { Player="dragger", On=true, Body="body" });
         var handOff = Roundtrip(new DragHandPacket { Player="dragger", On=false });
         Check(hand.Player == "dragger" && hand.On && hand.Body == "body" && !handOff.On && handOff.Body == "", "drag hand-pose packet roundtrip");
@@ -296,11 +445,40 @@ internal static class Program
         Check(firstReturn>0 && !instructions.Take(firstReturn).Select(i=>i.Operand).OfType<MethodReference>().Any(m=>m.DeclaringType.Name=="CorpseRagdollSettlement" || m.Name=="BuildPose"),
             "managed release returns before native settlement and final pose stream");
         int ownership=instructions.ToList().FindIndex(i=>i.Operand is FieldReference f && f.Name=="_nativeOwnershipStarted");
-        int settlement=instructions.ToList().FindIndex(i=>i.Operand is MethodReference m && m.DeclaringType.Name=="CorpseRagdollSettlement");
-        Check(ownership>=0 && ownership<settlement,"rejected acquisition cannot schedule native settlement");
+        int settlement=instructions.ToList().FindIndex(i=>i.Operand is MethodReference m && m.DeclaringType.Name=="NativeDragBody" && m.Name=="Release");
+        Check(ownership>=0 && ownership<settlement,"rejected acquisition cannot schedule the native body release (which schedules settlement)");
     }
 }
 
+// CorpseHandoffV1-shaped facade: same signatures and real Rupture DTOs, scripted results.
+public static class FixtureHandoff
+{
+    public static int AbiVersion => 1;
+    public static Rupture.Integration.HandoffState State = Rupture.Integration.HandoffState.Managed;
+    public static bool Simulating;
+    public static bool Throw;
+    public static HandoffResult InspectResult, ReleaseResult = HandoffResult.Pending, RenewResult, AdoptResult;
+    public static ulong Token = 77;
+    public static int Releases, Renews, Adopts;
+    public static float LastTimeout;
+    public static void Reset()
+    {
+        State = Rupture.Integration.HandoffState.Managed; Simulating = false; Throw = false;
+        InspectResult = HandoffResult.Ok; ReleaseResult = HandoffResult.Pending; RenewResult = HandoffResult.Ok; AdoptResult = HandoffResult.Ok;
+        Token = 77; Releases = Renews = Adopts = 0; LastTimeout = 0;
+    }
+    public static HandoffResult Inspect(Corpse corpse, out CorpseHandoffInfo info)
+    {
+        if (Throw) throw new InvalidOperationException("fixture failure");
+        info = new CorpseHandoffInfo { State = State, Simulating = Simulating, ProfileId = "fixture", DeathSequence = 5, OwnershipEpoch = 2,
+            SeveredRoots = new Transform[0], WeaponIndependent = true };
+        return InspectResult;
+    }
+    public static HandoffResult Release(Corpse corpse, HandoffRelease request, out ulong token)
+    { Releases++; LastTimeout = request.LeaseTimeout; token = Token; return ReleaseResult; }
+    public static HandoffResult Renew(ulong token) { Renews++; return RenewResult; }
+    public static HandoffResult Adopt(ulong token) { Adopts++; return AdoptResult; }
+}
 public static class FixtureAbi
 {
     public static DragResult Result;

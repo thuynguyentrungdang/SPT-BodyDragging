@@ -16,5 +16,9 @@ Copyright (c) awnova, KaiKiNoodles (original RevivalMod), thuynguyentrungdang (B
 The trail-point follow math, the owner-side DirectApplyMotion walk, the kinematic hand tether and
 the detach-from-root handling are re-implemented from its DownedDragController and BodyRagdoll.
 
+The native drag's rig tuning (Features/NativeRigTuning.cs: human segment masses, per-part speed
+caps, ground friction, seating bodies on their joints) is adapted from KMA Body Drag
+(https://github.com/awnova/KMA-BodyDrag), Copyright (c) awnova, licensed under the MIT License.
+
 The optional Rupture integration (SPT-BodyDragging/Integration, BodyDragFika/ManagedDrag*) was
 contributed by rootdarkarchon against Rupture's corpse drag ABI V1.

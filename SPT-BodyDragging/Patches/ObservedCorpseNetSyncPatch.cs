@@ -32,7 +32,7 @@ namespace BodyDragging.Patches
         [PatchPrefix]
         private static bool Prefix(ObservedCorpse __instance, Vector3 position, float corpseSyncThreshold, ref float __result)
         {
-            if (!CorpseDragController.IsNativeDragging(__instance))
+            if (!CorpseDragController.IsNativeDragging(__instance) && !RemoteCorpseDragSim.IsSimulating(__instance))
                 return true;
             // "already within threshold" - skip the pelvis shift and the WakeUp() that comes with it
             __result = corpseSyncThreshold;

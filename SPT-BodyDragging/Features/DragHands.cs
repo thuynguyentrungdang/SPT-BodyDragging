@@ -60,7 +60,28 @@ namespace BodyDragging.Features
         private static readonly Dictionary<string, HandState> Remote = new();
         private static readonly List<string> RemoteScratch = new();
 
-        internal static bool BlocksAim(Player player) => _armed && _player != null && ReferenceEquals(player, _player);
+        // pistols may ADS (both hands come onto the gun, the pose drops while aiming); any other
+        // weapon (Armed Drag = AnyWeapon) stays hip-fire only
+        internal static bool BlocksAim(Player player) =>
+            _armed && _player != null && ReferenceEquals(player, _player) && !IsPistolInHands(player);
+
+        // no reloading while dragging: the left hand is on the body
+        internal static bool BlocksReload(Player player) =>
+            _player != null && ReferenceEquals(player, _player);
+
+        private static bool IsPistolInHands(Player player)
+        {
+            Weapon weapon = player.TryGetItemInHands<Weapon>();
+            return weapon != null && weapon.WeapClass == "pistol";
+        }
+
+        // Set while ToggleAim runs for the dragging player: EFT drops the left-hand item first
+        // (Player.RemoveLeftHandItem), which would send the left hand to the gun before our next
+        // tick puts it back.
+        internal static bool SuppressLeftHandRemoval;
+
+        internal static bool KeepsLeftHandWhileAiming(Player player) =>
+            _armed && _player != null && ReferenceEquals(player, _player) && IsPistolInHands(player);
 
         internal static void Begin(Player player, object owner, string bodyId)
         {
@@ -130,7 +151,8 @@ namespace BodyDragging.Features
             if (!_armed || _local == null)
                 return;
 
-            if (player.HandsController is Player.FirearmController firearm && firearm.IsAiming)
+            SuppressLeftHandRemoval = false;
+            if (BlocksAim(player) && player.HandsController is Player.FirearmController firearm && firearm.IsAiming)
                 firearm.SetAim(false);
 
             bool want = PoseWanted(player);
@@ -147,12 +169,15 @@ namespace BodyDragging.Features
             }
         }
 
-        // arm up only while the weapon is steady in hand; reloads need the left hand
+        // arm up only while the weapon is steady in hand; reloads need the left hand. A pistol keeps
+        // the pose through ADS (one-handed aim); aiming with anything else is blocked outright.
         private static bool PoseWanted(Player player)
         {
             if (!(player.HandsController is Player.FirearmController firearm) || player.InventoryController.IsChangingWeapon)
                 return false;
-            return !firearm.IsAiming && !firearm.IsInReloadOperation() && !firearm.IsInRemoveOperation();
+            if (firearm.IsAiming && !IsPistolInHands(player))
+                return false;
+            return !firearm.IsInReloadOperation() && !firearm.IsInRemoveOperation();
         }
 
         private static void ApplyPose(Player player, bool on, ref bool applied)
@@ -373,7 +398,7 @@ namespace BodyDragging.Features
             Rigidbody downed = BodyDragSync.ResolveDownedChest?.Invoke(bodyId);
             if (downed != null)
                 return downed;
-            RigidbodySpawner[] spawners = RemoteCorpseDragFollower.FindCorpse(bodyId)?.Ragdoll?._rigidbodySpawners;
+            RigidbodySpawner[] spawners = RemoteCorpseDragSim.FindCorpse(bodyId)?.Ragdoll?._rigidbodySpawners;
             if (spawners == null)
                 return null;
             foreach (RigidbodySpawner spawner in spawners)

@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using EFT.AssetsManager;
 using EFT.Interactive;
+using JsonType;
 using UnityEngine;
 
 namespace BodyDragging.Features
@@ -60,7 +61,7 @@ namespace BodyDragging.Features
             ragdoll._isVisibleTest = AlwaysVisible;
         }
 
-        private static void HandBack(CorpseRagdoll ragdoll)
+        internal static void HandBack(CorpseRagdoll ragdoll)
         {
             if (ragdoll == null || !TakenOver.TryGetValue(ragdoll, out TakenOverState state))
                 return;
@@ -78,6 +79,33 @@ namespace BodyDragging.Features
                 pending.Owner.StopCoroutine(pending.Coroutine);
             PendingByCorpse.Remove(corpse);
             BodyDragLog.Info("[CorpseDrag] Cancelled previous settling handoff");
+        }
+
+        // Put a corpse down on a pose another peer declared (BodyDragRest): root under the body, every
+        // bone back to its world pose (parents first), motion cleared, and EFT's own stop run now
+        // instead of waiting out the settle cycle.
+        // handoff: a Rupture handoff lease owns the corpse (its Adopt rebuilds the rig from these bones), so EFT's own
+        // stop is skipped.
+        internal static void SetDown(Corpse corpse, Vector3 root, TransformSync[] bones, bool handoff = false)
+        {
+            CorpseRagdoll ragdoll = corpse?.Ragdoll;
+            if (ragdoll == null || bones == null || ragdoll._rigidbodySpawners == null || bones.Length != ragdoll._rigidbodySpawners.Length)
+                return;
+            Cancel(corpse);
+            corpse.transform.position = root;
+            corpse.ApplyTransformSync(bones);
+            foreach (RigidbodySpawner spawner in ragdoll._rigidbodySpawners)
+            {
+                Rigidbody body = spawner != null ? spawner.Rigidbody : null;
+                if (body == null || body.isKinematic)
+                    continue;
+                body.velocity = Vector3.zero;
+                body.angularVelocity = Vector3.zero;
+            }
+            Physics.SyncTransforms();
+            if (!handoff && !ragdoll._isPhysicsDone)
+                CompleteSettlement(ragdoll);
+            HandBack(ragdoll);
         }
 
         internal static void Schedule(Corpse corpse, CorpseRagdoll ragdoll)
